@@ -15,6 +15,7 @@ from detect import box_blur, luminance
 MARGIN = 0.02
 W_SIZE, W_CLEAR, W_CLUTTER, W_CONT, W_STAY = 1.0, 0.25, 0.6, 0.15, 0.08
 BUSY_FLAG = 0.8                     # a chosen area this cluttered is worth a look (legibility 'auto' already reacts from 0.45)
+SPREAD_RATIO, SPREAD_FULL = 2.0, 0.3   # light / shadow mix (spread_of): 13.5 % of the area ≥ 2:1 off its median → busy 0.45
 
 def integral(a):
     c = np.zeros((a.shape[0] + 1, a.shape[1] + 1), np.float64)
@@ -58,8 +59,26 @@ def iou(a, b):
     i = iw * ih
     return i / (a[2] * a[3] + b[2] * b[3] - i + 1e-9)
 
-def tone_of(rect, rgbs):
-    """tone of a given area (an agent's confirmed `free`): median colour and clutter, all samples together"""
+def wcag_lum(rgb):
+    """relative luminance (WCAG) of 0..1 sRGB values, any shape (…, 3)"""
+    c = np.where(rgb <= 0.03928, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    return c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
+
+def spread_of(pix, med):
+    """light / shadow mix: the share of the area at least SPREAD_RATIO:1 away from its median colour on the side the
+    text is on, as 0..1 (SPREAD_FULL of the area → 1). The engine fits the text to 4.5:1 against the median only
+    (J.toneScheme / J.fitContrast: lighter text when the median's J.lum < 0.5), so over those pixels it can fall to
+    about 2:1. Clutter (local stddev, edges) misses a soft light patch or a shadow across half the area."""
+    m = float(wcag_lum(med))
+    p = wcag_lum(pix)
+    light_text = float(med[0] * 0.2126 + med[1] * 0.7152 + med[2] * 0.0722) < 0.5
+    r = (p + 0.05) / (m + 0.05) if light_text else (m + 0.05) / (p + 0.05)
+    frac = float((r >= SPREAD_RATIO).mean())
+    return frac, float(np.clip(frac / SPREAD_FULL, 0, 1))
+
+def tone_of(rect, rgbs, detail=None):
+    """tone of an area: median colour and how busy it is behind text, all samples together. busy is the larger of
+    the clutter (local stddev + edges) and the light / shadow spread (spread_of); `detail` gets both."""
     h, w, _ = rgbs[0].shape
     x0, y0 = int(rect[0] * w), int(rect[1] * h)
     x1, y1 = max(x0 + 1, int((rect[0] + rect[2]) * w)), max(y0 + 1, int((rect[1] + rect[3]) * h))
@@ -68,8 +87,11 @@ def tone_of(rect, rgbs):
     sd = np.mean([s[y0:y1, x0:x1].mean() for s, _ in maps])
     ed = np.mean([e[y0:y1, x0:x1].mean() for _, e in maps])
     med = np.median(pix, 0)
-    return {'color': '#%02X%02X%02X' % tuple(int(round(v * 255)) for v in med),
-            'busy': round(float(np.clip(0.5 * sd / 0.12 + 0.5 * ed / 0.18, 0, 1)), 3)}
+    clutter = float(np.clip(0.5 * sd / 0.12 + 0.5 * ed / 0.18, 0, 1))
+    frac, spread = spread_of(pix, med)
+    if detail is not None:
+        detail.update(clutter=round(clutter, 3), spread=round(spread, 3), offTone=round(frac, 3))
+    return {'color': '#%02X%02X%02X' % tuple(int(round(v * 255)) for v in med), 'busy': round(max(clutter, spread), 3)}
 
 def choose(subj, rgbs, frame_wh, prev=None, n_free=4):
     """subj: bool mask (union over samples); rgbs: list of h×w×3 frames. Returns dict with free (best first), busy,
@@ -133,9 +155,36 @@ def choose(subj, rgbs, frame_wh, prev=None, n_free=4):
         problems.append('small free area (short side %.0f %% of the frame): text will be small' % (short[best] * 100))
     if clutter[best] >= BUSY_FLAG:
         problems.append('busy picture in the free area (%.2f): check the legibility treatment' % clutter[best])
-    return {
-        'free': rects, 'tone': tone_of(rects[0], rgbs),
-        'detail': {'score': round(float(score[best]), 3), 'size': round(float(size[best]), 3), 'clearance': round(float(clear[best]), 3),
-                   'clutter': round(float(clutter[best]), 3), 'onSubject': round(float(hit[best]), 4), 'kept': stay is not None and best == stay},
-        'problems': problems,
-    }
+    detail = {'score': round(float(score[best]), 3), 'size': round(float(size[best]), 3), 'clearance': round(float(clear[best]), 3),
+              'onSubject': round(float(hit[best]), 4), 'kept': stay is not None and best == stay}
+    return {'free': rects, 'tone': tone_of(rects[0], rgbs, detail), 'detail': detail, 'problems': problems}
+
+def larger(subj, rgbs, frame_wh, cur, min_gain=1.12, n=8):
+    """for a line whose text came out too small: grid areas clear of the subject whose short side is at least
+    `min_gain` × the current area's, best first (size, then keeping the current area's place, then calm picture)"""
+    h, w = subj.shape
+    W, H = frame_wh
+    C = CANDS
+    px = lambda v, n: np.clip(np.round(v * n).astype(int), 0, n)
+    x0, y0, x1, y1 = px(C[:, 0], w), px(C[:, 1], h), px(C[:, 0] + C[:, 2], w), px(C[:, 1] + C[:, 3], h)
+    area_px = np.maximum((x1 - x0) * (y1 - y0), 1)
+    hit = rect_sum(integral(dilate(subj, MARGIN)), x0, y0, x1, y1) / area_px
+    short = np.minimum(C[:, 2] * W, C[:, 3] * H) / min(W, H)
+    cur_short = min(cur[2] * W, cur[3] * H) / min(W, H)
+    ok = (hit <= 0.005) & (short >= cur_short * min_gain)
+    if not ok.any():
+        return []
+    ed = np.zeros(len(C))
+    for rgb in rgbs:
+        ed += rect_sum(integral(clutter_maps(luminance(rgb))[1]), x0, y0, x1, y1) / area_px
+    ix = np.maximum(0, np.minimum(C[:, 0] + C[:, 2], cur[0] + cur[2]) - np.maximum(C[:, 0], cur[0]))
+    iy = np.maximum(0, np.minimum(C[:, 1] + C[:, 3], cur[1] + cur[3]) - np.maximum(C[:, 1], cur[1]))
+    keep = ix * iy / max(cur[2] * cur[3], 1e-6)
+    score = np.minimum(1, short / 0.45) + 0.4 * np.sqrt(C[:, 2] * C[:, 3]) + 0.3 * keep - 0.3 * np.clip(ed / len(rgbs) / 0.18, 0, 1)
+    out = []
+    for j in np.argsort(-np.where(ok, score, -1e9)):
+        if not ok[j] or len(out) >= n:
+            break
+        if all(iou(C[j], C[k]) < 0.5 for k in out):
+            out.append(int(j))
+    return [[round(float(v), 4) for v in C[j]] for j in out]

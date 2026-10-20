@@ -2,7 +2,8 @@
 For when no MV director agent supplies the block (contract: docs/BACKDROP.md).
 
   python tools/backdrop/backdrop.py analyze PROJECT.jizura.json (--video BG.mp4 | --pan PAN.json) [options]
-  python tools/backdrop/backdrop.py verify  PROJECT.jizura.json (--video BG.mp4 | --pan PAN.json) [options]
+  python tools/backdrop/backdrop.py verify  PROJECT.jizura.json (--video BG.mp4 | --pan PAN.json) [options] [--fix]
+  python tools/backdrop/backdrop.py fix     PROJECT.jizura.json (--video BG.mp4 | --pan PAN.json) [options] [--rounds N]
 
 analyze  plans the lyrics once (Node, src/ engine) for each line's [start, visEnd]; samples the background over that
          time (video: ffmpeg frames at start / middle / end and every ≤1.5 s; pan: the illustration through the pan
@@ -11,6 +12,9 @@ analyze  plans the lyrics once (Node, src/ engine) for each line's [start, visEn
          agent hook) and the block into the project.
 verify   renders the transparent lyric layer over background frames in headless Chrome / Edge (or a browser you
          open on the printed URL) and reports the pass criteria: OUT/verify/report.md, report.json, contact.png.
+fix      verify, then give each failing line the fixes of docs/BACKDROP.md in order (seed → area → legibility), in
+         project.overrides only, re-verifying just the lines whose drawing changed, until they pass or the fixes run
+         out (fix.py); the report says what was tried and why a line is left failing.
 
 Needs: Python 3 with numpy + Pillow, Node, ffmpeg / ffprobe on PATH; for person masks npx + HyperFrames (local model).
 """
@@ -234,7 +238,8 @@ def analyze(args):
                 reasons.append('subject moves or the shot changes during the line (areas are the union)')
         if conf.get('free'):
             free = [clip_rect(r) for r in conf['free']]
-            tone, detail = zones.tone_of(free[0], rgbs), {'confirmed': True}
+            detail = {'confirmed': True}
+            tone = zones.tone_of(free[0], rgbs, detail)
         else:
             res = zones.choose(subj, rgbs, (src.w, src.h), prev)
             free, tone, detail = res['free'], res['tone'], res['detail']
@@ -295,7 +300,7 @@ def main():
             pass
     ap = argparse.ArgumentParser(prog='backdrop.py', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='cmd', required=True)
-    for name in ('analyze', 'verify'):
+    for name in ('analyze', 'verify', 'fix'):
         p = sub.add_parser(name)
         p.add_argument('project', help='the .jizura.json project')
         p.add_argument('--video', help='background video')
@@ -313,9 +318,15 @@ def main():
             p.add_argument('--scale', type=float, default=0.5, help='render scale of the lyric layer (default 0.5)')
             p.add_argument('--timeout', type=float, default=900)
             p.add_argument('--port', type=int, default=0)
+            if name == 'verify':
+                p.add_argument('--fix', action='store_true', help='then fix the failing lines in project.overrides (same as the fix command)')
+            p.add_argument('--rounds', type=int, default=30, help='fix: at most this many rounds, one step of one line each (default 30)')
     args = ap.parse_args()
     if args.cmd == 'analyze':
         analyze(args)
+    elif args.cmd == 'fix' or args.fix:
+        import fix
+        fix.run(args, sys.modules[__name__])
     else:
         import verify
         verify.run(args, sys.modules[__name__])

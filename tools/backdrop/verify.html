@@ -6,8 +6,8 @@
 <script>
 /* Backdrop verification (served by tools/backdrop/backdrop.py verify): plans the project, draws the transparent lyric
    layer at each sample time over the background frame and the subject mask the tool prepared, measures, and posts
-     result (JSON): { rows: [{ t, line, cuts, ink, outside, onSubject, contrast, bgContrast, glyph, method, pass }], errors }
-     sheet (PNG):   the contact sheet — one tile per cut (its middle sample), subject tinted red, area dashed green
+     result (JSON): { runs: { [id]: { rows: [{ t, line, cuts, ink, outside, onSubject, contrast, bgContrast, glyph, method, fails }], errors } } }
+     tile/NAME (PNG): a contact sheet tile per cut (its 60 % sample), subject tinted red, area dashed green
    Measures (at the render scale, alpha > 40 counts as ink):
      outside    ink farther than 1.5 px outside every active cut's area — and the previous cut's during a transition
                 (null when one of them has no area)
@@ -129,17 +129,29 @@ function verdict(job, r) {
   return f;
 }
 
-async function run() {
-  const job = await (await fetch('job/job.json')).json();
-  const p = Object.assign(J.defaultProject(), job.project);
-  say('fonts…');
-  await J.ensureFonts(p.lyrics, null);
-  const plan = J.plan(p, { duration: job.duration, beats: [] });
-  const K = job.scale, cw = Math.round(plan.W * K), ch = Math.round(plan.H * K);
-  const R = new J.Renderer(), result = { rows: [], errors: [], W: plan.W, H: plan.H, scale: K }, tiles = [];
+// what the app's export loads before it draws (src/12_ui.js): the plan's faces, for the lyrics, title and HUD text
+const HUD_CHARS = '0123456789:./-_()【】・No.LYRICRECUNTITLEDXYlinebpminterlude—─／ ';
+const loadedFaces = () => [...document.fonts].filter(f => f.status === 'loaded').length;
+
+async function runOne(job, run, result) {
+  const p = Object.assign(J.defaultProject(), run.project);
+  const K = job.scale, pre = run.prefix || '', opts = { duration: job.duration, beats: [] };
+  say(`${run.id}: fonts…`);
+  let plan = J.plan(p, opts);
+  await J.ensureFonts(p.lyrics + (p.title || '') + (p.artist || '') + HUD_CHARS, J.fontsOfPlan(plan));
+  plan = J.plan(p, opts);                                   // laid out with the real metrics
+  const cw = Math.round(plan.W * K), ch = Math.round(plan.H * K);
+  // warm-up: draw every sample once, so faces the drawing asks for on the way (unicode-range subsets, decoration text)
+  // are in before anything is measured — otherwise the first frames of a fresh page measure fallback glyphs
+  const n0 = loadedFaces(), warm = document.createElement('canvas'); warm.width = cw; warm.height = ch;
+  for (const s of run.samples) { try { new J.Renderer().frame(warm.getContext('2d'), plan, s.t, { scale: K, transparent: true, noGhost: true }); } catch (e) {} }
+  await document.fonts.ready;
+  if (loadedFaces() !== n0) { J.glyphs.clear(); J.metrics.clear(); plan = J.plan(p, opts); }
+  const R = new J.Renderer(), tiles = [];
+  Object.assign(result, { W: plan.W, H: plan.H, scale: K });
   let nFail = 0;
-  for (const [i, s] of job.samples.entries()) {
-    say(`frame ${i + 1} / ${job.samples.length}`);
+  for (const [i, s] of run.samples.entries()) {
+    say(`${run.id}: frame ${i + 1} / ${run.samples.length}`);
     const cuts = plan.cuts.filter(c => c.line >= 0 && c.layout !== 'interlude' && s.t >= c.start && s.t < c.start + c.dur);
     const layer = document.createElement('canvas'); layer.width = cw; layer.height = ch;
     try { R.frame(layer.getContext('2d'), plan, s.t, { scale: K, transparent: true, noGhost: true }); }
@@ -154,42 +166,64 @@ async function run() {
     if (row.fails.length && nFail++ < 80) {                // failing frames saved for a look: verify/fails/t….png
       const blob = await new Promise(ok => composite(bgC, mkC, layer, cuts, K).toBlob(ok, 'image/png'));
       row.image = 'fails/' + s.name + '.png';
-      await fetch('frame/' + s.name, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+      await fetch('frame/' + pre + s.name, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
     }
     if (s.thumb) tiles.push({ s, row, layer, bgC, mkC, cuts });
   }
-  // contact sheet
-  const tw = plan.W >= plan.H ? 384 : 216, th = Math.round(tw * plan.H / plan.W), cols = plan.W >= plan.H ? 4 : 6, gap = 6, bar = 18;
+  // contact sheet tiles, one per cut (its 60 % sample); the tool lays them out (a fix round re-renders only some lines)
+  const tw = plan.W >= plan.H ? 384 : 216, th = Math.round(tw * plan.H / plan.W), bar = 18;
   const sheet = document.getElementById('sheet');
-  sheet.width = cols * (tw + gap); sheet.height = Math.max(1, Math.ceil(tiles.length / cols)) * (th + bar + gap);
-  const O = sheet.getContext('2d');
-  O.fillStyle = '#111'; O.fillRect(0, 0, sheet.width, sheet.height);
-  tiles.forEach(({ s, row, layer, bgC, mkC, cuts }, k) => {
-    const x = (k % cols) * (tw + gap), y = Math.floor(k / cols) * (th + bar + gap), sc = tw / cw;
-    O.drawImage(bgC, x, y + bar, tw, th);
+  for (const { s, row, layer, bgC, mkC, cuts } of tiles) {
+    sheet.width = tw; sheet.height = th + bar;
+    const O = sheet.getContext('2d'), sc = tw / cw;
+    O.fillStyle = '#111'; O.fillRect(0, 0, tw, th + bar);
+    O.drawImage(bgC, 0, bar, tw, th);
     const tint = document.createElement('canvas'); tint.width = cw; tint.height = ch;
     const T = tint.getContext('2d'), d = T.createImageData(cw, ch), m = pixels(mkC);
     for (let i = 0; i < cw * ch; i++) if (m[i * 4] > 127) { d.data[i * 4] = 255; d.data[i * 4 + 3] = 70; }
     T.putImageData(d, 0, 0);
-    O.drawImage(tint, x, y + bar, tw, th);
-    O.drawImage(layer, x, y + bar, tw, th);
+    O.drawImage(tint, 0, bar, tw, th);
+    O.drawImage(layer, 0, bar, tw, th);
     O.strokeStyle = '#3f3'; O.setLineDash([4, 3]);
-    for (const c of cuts) if (c.zone) O.strokeRect(x + c.zone.x * K * sc, y + bar + c.zone.y * K * sc, c.zone.w * K * sc, c.zone.h * K * sc);
+    for (const c of cuts) if (c.zone) O.strokeRect(c.zone.x * K * sc, bar + c.zone.y * K * sc, c.zone.w * K * sc, c.zone.h * K * sc);
     O.setLineDash([]);
-    O.fillStyle = row.fails.length ? '#b33' : row.method === 'empty' || row.method === 'faint' ? '#555' : '#284'; O.fillRect(x, y, tw, bar);
+    O.fillStyle = row.fails.length ? '#b33' : row.method === 'empty' || row.method === 'faint' ? '#555' : '#284'; O.fillRect(0, 0, tw, bar);
     O.fillStyle = '#fff'; O.font = '12px sans-serif';
-    O.fillText(`L${s.line} ${s.t.toFixed(2)}s ${row.fails.length ? row.fails.join(' ') : row.method === 'empty' || row.method === 'faint' ? 'no text yet' : 'ok'}  c${row.contrast ?? '-'} g${row.glyph != null ? (row.glyph * 100).toFixed(1) : '-'}%`, x + 4, y + 13);
-  });
+    O.fillText(`L${s.line} ${s.t.toFixed(2)}s ${row.fails.length ? row.fails.join(' ') : row.method === 'empty' || row.method === 'faint' ? 'no text yet' : 'ok'}  c${row.contrast ?? '-'} g${row.glyph != null ? (row.glyph * 100).toFixed(1) : '-'}%`, 4, 13);
+    const blob = await new Promise(ok => sheet.toBlob(ok, 'image/png'));
+    await fetch('tile/' + pre + s.name, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+  }
+}
+
+// a job is one or more runs (the project; in a fix round also variants of it), each planned on its own; a run's
+// images get its prefix. After a job the page asks for the next one (the fix loop keeps it open) until told to stop.
+async function runJob() {
+  const job = await (await fetch('job/job.json', { cache: 'no-store' })).json(), result = { runs: {} };
+  for (const run of job.runs) {
+    const res = result.runs[run.id] = { rows: [], errors: [] };
+    try { await runOne(job, run, res); } catch (e) { res.errors.push('run: ' + e.stack); }
+  }
   say('posting…');
   await fetch('result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(result) });
-  const blob = await new Promise(ok => sheet.toBlob(ok, 'image/png'));
-  await fetch('sheet', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
   await fetch('done', { method: 'POST', body: '1' });
-  say(`done: ${result.rows.length} frames, ${result.rows.filter(r => r.fails.length).length} failing, ${result.errors.length} errors`);
+  const rows = Object.values(result.runs).flatMap(r => r.rows);
+  say(`done: ${rows.length} frames, ${rows.filter(r => r.fails.length).length} failing — waiting for the next job`);
   window.RESULT = result;
 }
-run().catch(async e => {
-  say(e.stack);
-  try { await fetch('result', { method: 'POST', body: JSON.stringify({ rows: [], errors: ['run: ' + e.stack] }) }); await fetch('done', { method: 'POST', body: '1' }); } catch (_) {}
-});
+async function main() {
+  for (let seq = 0; ;) {
+    const t = await (await fetch('next?seq=' + seq, { cache: 'no-store' })).text();
+    if (t === 'wait') continue;
+    if (!/^\d+$/.test(t)) break;
+    seq = +t;
+    try { await runJob(); }
+    catch (e) {
+      say(e.stack);
+      await fetch('result', { method: 'POST', body: JSON.stringify({ runs: {}, errors: ['run: ' + e.stack] }) });
+      await fetch('done', { method: 'POST', body: '1' });
+    }
+  }
+  say('finished');
+}
+main().catch(e => say(e.stack));
 </script></body></html>

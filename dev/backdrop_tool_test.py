@@ -6,7 +6,9 @@ across it and pushes in, and a 9-line project; runs `backdrop.py analyze` and ch
   * the pan maths: the figure's known box moved by the pan keyframes lands where the rendered frame shows it
   * every chosen free area keeps clear of the figure's (known, moved) box during its line
   * the review hook exists (review.json + review.png) and a confirmed `free` is taken as given on a re-run
---verify also runs `backdrop.py verify` (needs Chrome or Edge) and checks the report and contact sheet exist.
+  * an area mixing a sunlit patch and shadow reads as busy (tone.busy ≥ 0.45: legibility 'auto' reacts), the sky not
+--verify also runs `backdrop.py verify` (needs Chrome or Edge) and checks the report and contact sheet exist, then
+`backdrop.py fix`: only project.overrides changes, and every line passes or has a reason in the report.
 """
 import json, os, subprocess, sys, tempfile
 import numpy as np
@@ -100,6 +102,18 @@ def main():
     ok(e2['free'] == [[0.05, 0.1, 0.4, 0.45]], 'confirmed free area used: %s' % e2['free'])
     ok(json.load(open(os.path.join(bd, 'review.json'), encoding='utf-8'))['lines'][2]['confirm'], 'confirm kept in the new review.json')
 
+    # light / shadow: an area half in a sunlit patch reads as busy (legibility 'auto' turns a treatment on) although its
+    # clutter is low; the even night sky does not
+    sys.path.insert(0, TOOL)
+    import zones
+    dark = np.ones((90, 160, 3)) * np.array([0.1, 0.1, 0.18])
+    mixed = dark.copy()
+    mixed[:, :60] = [0.75, 0.7, 0.6]
+    d = {}
+    ok(zones.tone_of([0, 0, 1, 1], [mixed], d)['busy'] >= 0.45 and d['clutter'] < 0.45, 'light / shadow mix reads as busy: %s' % d)
+    ok(zones.tone_of([0, 0, 1, 1], [dark])['busy'] < 0.1, 'an even area stays calm')
+    ok(all(e['tone']['busy'] < 0.45 for e in proj['backdrop']['track']), 'the night sky stays below the auto threshold')
+
     if '--verify' in sys.argv:
         r = run('verify', proj_path, '--pan', os.path.join(out, 'pan.json'), '--out', bd, '--duration', '24', '--timeout', '600')
         rep = json.loads(r.stdout.strip().splitlines()[-1])
@@ -107,6 +121,19 @@ def main():
         for f in ('report.json', 'report.md', 'contact.png'):
             ok(os.path.exists(os.path.join(bd, 'verify', f)), 'verify wrote ' + f)
         print('verify:', 'PASS' if rep['pass'] else 'FAIL (lines %s)' % rep['failing'], '->', os.path.join(bd, 'verify', 'report.md'))
+        # the fix loop: only project.overrides changes, and every line passes or the report says why not
+        before = json.load(open(proj_path, encoding='utf-8'))
+        r = run('fix', proj_path, '--pan', os.path.join(out, 'pan.json'), '--out', bd, '--duration', '24', '--timeout', '600')
+        fx = json.loads(r.stdout.strip().splitlines()[-1])
+        after = json.load(open(proj_path, encoding='utf-8'))
+        ok(not fx['errors'], 'fix errors: %s' % fx['errors'])
+        ok(all(before.get(k) == after.get(k) for k in set(before) | set(after) if k != 'overrides'), 'fix writes project.overrides only')
+        ok(all(set(o) <= {'seed', 'zone', 'tone', 'legibility'} for o in after.get('overrides', {}).values()), 'fix writes its own fields only')
+        ok(set(fx['failing']) == set(int(k) for k in fx['unresolved']) and all(fx['unresolved'].values()), 'a reason for every failing line: %s' % fx)
+        rep = json.load(open(os.path.join(bd, 'verify', 'report.json'), encoding='utf-8'))
+        ok(len(rep['lines']) == 9 and all(l['frames'] for l in rep['lines']), 'merged report covers every line')
+        ok(os.path.exists(os.path.join(bd, 'verify', 'fix.json')) and not os.path.exists(os.path.join(bd, 'verify', 'variants')), 'fix.json, variants cleaned up')
+        print('fix: %d round(s), fixed lines %s, left %s -> %s' % (fx['rounds'], fx['fixed'], fx['unresolved'] or 'none', os.path.join(bd, 'verify', 'report.md')))
     print('backdrop tool: %d checks passed (%s)' % (n, out))
 
 if __name__ == '__main__':

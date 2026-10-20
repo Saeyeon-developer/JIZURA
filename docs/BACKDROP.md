@@ -85,7 +85,8 @@ For each lyric line shown over `[start, visEnd]`:
 * `node dev/backdrop_test.js [REF_SRC_DIR]` — planner checks in Node; with the `src/` of a reference commit
   (`git archive <commit> src | tar -x -C /tmp/ref`) it also proves plans without backdrop data are unchanged.
 * `python tools/backdrop/backdrop.py verify …` — the same measurements on the real background, with a report (below).
-* `python dev/backdrop_tool_test.py [OUT] [--verify]` — the analysis tool on a synthetic pan (no assets needed).
+* `python dev/backdrop_tool_test.py [OUT] [--verify]` — the analysis tool on a synthetic pan (no assets needed);
+  `--verify` also runs `verify` and then `fix` (only `project.overrides` may change; every line passes or has a reason).
 * `python3 build.py --dev`, then serve `dev/www` and open `backdrop_check.html` — renders the lyric layer over a
   synthetic picture and reports, per frame, the lyric pixels outside the area and over the subject
   (`window.RESULT`), with a contact sheet. First run: with a subject-avoiding track, lyric pixels on the subject went
@@ -93,7 +94,8 @@ For each lyric line shown over `[start, visEnd]`:
 
 Suggested pass criteria for an agent: no lyric pixels outside the area (clipped), < 2 % on the subject mask, text
 over its local background ≥ 4.5:1, smallest glyph ≥ 3 % of the output height. Fix a failing line by re-rolling its
-`seed`, then moving / enlarging its area, then `legibility: "plate"`.
+`seed`, then moving / enlarging its area, then `legibility: "plate"`. `backdrop.py fix` does this automatically
+(see "The fix loop" below).
 
 ## Where the data comes from
 
@@ -111,11 +113,13 @@ the u2net_human_seg model, CPU, weights fetched once). Without HyperFrames it fa
 python tools/backdrop/backdrop.py analyze song.jizura.json --video bg.mp4          # an AI / finished video
 python tools/backdrop/backdrop.py analyze song.jizura.json --pan pan.json          # a pan over an illustration
 python tools/backdrop/backdrop.py verify  song.jizura.json --video bg.mp4          # (or --pan) check the result
+python tools/backdrop/backdrop.py fix     song.jizura.json --video bg.mp4          # check, then fix what fails
 ```
 
 Common options: `--out DIR` (default `song.backdrop/` next to the project), `--offset S` (background time = song time
 + offset), `--duration S` (song length; default the background's), `--detector auto|person|saliency`; analyze:
-`--legibility`, `--no-write`, `--review FILE`; verify: `--browser auto|none|PATH`, `--scale 0.5`, `--timeout`.
+`--legibility`, `--no-write`, `--review FILE`; verify / fix: `--browser auto|none|PATH`, `--scale 0.5`, `--timeout`
+(per job); fix: `--rounds N` (default 30); `verify --fix` is the same as `fix`.
 
 ### analyze
 
@@ -134,7 +138,14 @@ Common options: `--out DIR` (default `song.backdrop/` next to the project), `--o
    area)`. *size* weighs the short side against 45 % of the frame's short side, plus √area. *clutter* is the
    luminance stddev and edge density inside, averaged over the samples. `free` lists the best four that don't
    overlap much. The previous line's area is listed only when it is the choice, because the planner keeps it wherever
-   it appears. `tone.color` is the median colour inside the chosen area (all samples); `tone.busy` is its clutter.
+   it appears. `tone.color` is the median colour inside the chosen area (all samples). `tone.busy` is the larger of
+   its clutter and its **light / shadow spread**: the share of the area at least 2:1 (WCAG) away from the median on
+   the side the text is on (the engine makes the text lighter when the median's `J.lum` < 0.5), with 30 % of the area
+   counting as 1. The engine fits the text to 4.5:1 against the median only, so over those pixels it can fall to
+   about 2:1. Clutter misses this case: a soft sunlit patch or a shadow across half the area has few edges and little
+   local variation. From 13.5 % of the area, busy reaches 0.45 and `legibility: auto` turns a treatment on before
+   verify has to find the failure. review.json's `detail` lists `clutter`, `spread` and `offTone` (the raw share).
+   The contract is unchanged: busy is still one 0..1 number.
 5. **Write** `OUT/backdrop.json`, check it with `J.normalizeBackdrop` (every entry must survive), and put it into the
    project (unless `--no-write`). One track entry per line, `t0`/`t1` = the line's `[start, visEnd]` + offset.
 
@@ -186,13 +197,19 @@ Plans the project with its backdrop and takes three samples per lyric cut (35 %,
 sample it writes the background frame and subject mask at half the output size, then serves those files together
 with `verify.html` and the engine (`src/*.js` joined, as `build.py --dev` does, without running the build) on
 127.0.0.1. Headless Chrome or Edge renders the transparent layer, measures it, and posts the results back. With
-`--browser none` the tool prints the URL instead, for any browser, such as the Claude desktop browser pane. Output
-goes to `OUT/verify/`:
+`--browser none` the tool prints the URL instead, for any browser, such as the Claude desktop browser pane. Before
+measuring, the page loads fonts as the app's export does: the plan's faces, for the lyrics, title and HUD text. It
+then draws every sample once, so that faces requested along the way (unicode-range subsets, decoration text) are
+loaded too. Without this, the first frames of a fresh page measured fallback glyphs, and the same frame could pass or
+fail depending on what had been drawn before it. The page stays open for further jobs (the fix loop sends one per
+round), and a job can hold several variants of the project, each limited to some lines. Output goes to
+`OUT/verify/`:
 
 * `report.md` / `report.json` — per line: worst value of each measure, pass / fail, what to try
   (seed → area → plate), and the failing frames with the cuts drawn at the time. A cut still in its transition is
   marked `⇐name`; while it lasts, the previous cut's area also counts as inside.
 * `contact.png` — one tile per cut (its 60 % sample): background, subject tinted red, the lyric layer, area dashed.
+  The page posts the tiles one by one (`tiles/`), and the tool lays them out, so a fix round only re-renders its lines.
 * `fails/*.png` — the composite of every failing frame.
 
 | measure | how | pass |
@@ -204,13 +221,65 @@ goes to `OUT/verify/`:
 
 The glyph height is approximate: stacked vertical text merges into columns and measures too tall.
 
+### The fix loop
+
+`backdrop.py fix` (or `verify --fix`) verifies, then works through the failing lines with the fixes above, in order,
+until each passes or its fixes run out. Fixes are decisions, so they go into `project.overrides[line]` only:
+`seed`, `zone` + `tone`, and `legibility`. The `backdrop` block, the rest of the project and `src/` stay as they are.
+
+1. **Seed.** Three re-rolls (`overrides.seed` = the current one + 1, + 2, + 3). The planner draws a line from
+   `hash(project seed, line, seed)`. When every failing frame is a transition frame (`⇐name`), it tries five, because
+   the seed picks the transition.
+2. **Area** for "subject" / "glyph": the track entry's other `free` areas (for "glyph" only those with a short side at
+   least 12 % longer), then for "glyph" larger grid areas that stay clear of the line's subject (`zones.larger`; the
+   subject is analyze's union over the line, or the confirmed `avoid`). The area goes into `overrides.zone.rect` with
+   the tone measured inside it (`overrides.tone`), because the entry's tone describes its first area.
+   **Legibility** for "contrast": `"plate"`, then `"outline"`. When a line fails both, area + plate combinations are
+   tried too.
+3. **Seeds once more** (three more) when the area / legibility step has nothing that applies or nothing that helps.
+   The remaining glyph and contrast failures are mostly the layouts the seed picked: small type, text that shrinks
+   on its way out, glow or stickers in light colours right around the glyphs.
+
+**Left to right.** A line's picks depend on the lines before it, because the planner avoids what was used recently.
+Re-rolling line 3 redraws lines 4, 5 … as well, and can break lines that passed. Fixing several lines at once
+therefore churned on the synthetic pan, ending with more failing lines than it started with. So the loop fixes the
+earliest failing line first (the frontier) and judges the lines after it only afterwards. Lines before the frontier
+never change again. The exception is the line just before it, whose last cut the frontier's first transition
+replaces, so it is checked as well.
+
+**One round per step.** All candidates of a step (three seeds, or the areas and legibility values) are rendered
+side by side, as variants of the project in one job, and only for the frontier line and the line before it. The
+first passing candidate, in the order above, is kept. If none passes, the best one is kept when it is better than
+what the line had. "Better" counts frames with ink outside the area or on the subject first, then failing frames,
+then kinds of failure. A candidate that makes the line before it worse is never kept. Then every line whose drawing
+changed is verified again. `jz.js plan` gives each line a `sig`: a hash of its cuts with their colours, the cut
+before it and the screen effects over it. Lines whose `sig` did not change are not rendered again. A ロック line is
+left alone.
+
+**Report.** `report.md` / `report.json` are the merged result: each line's rows come from the last render of its
+current drawing, which is the same as a fresh `verify` would give. A **Fix loop** section lists, per line, what it
+failed on first and when its turn came, every candidate with its result, what was kept, and why a line is left
+failing. Reasons include: the area was confirmed in review.json; no larger area clear of the subject; the area is
+already large and the layouts set small text (pick a layout or split the cut); the text reads on the bare picture,
+so the line's own drawing is too light around the glyphs; the other free areas did not help with the subject
+(detection or framing: confirm `avoid` / `free`, or a director's call); or the line was not reached within
+`--rounds`. `fix.json` holds the same data, plus the overrides each line ended with.
+
+On the synthetic pan, a fix run takes about 45 s for 9 lines, mostly 13 rounds of ~3 s. Re-rolls cascade, so it
+renders about 100 lines in all, compared with 9 for one verify. Lines 1, 6, 7 and 8 pass after it. Line 2 is left
+on glyph height because its area was confirmed in review.json (the test does that on purpose). Line 5 is left on
+glyph height because its area is already 90 % of the frame and six seeds all drew small type.
+
 ### First results
 
 * **Synthetic pan** (`dev/backdrop_tool_test.py`: 9 lines, a figure sliding into the frame). Every chosen area stays
   clear of the figure's true moving box. In verification, 0.2 % of all lyric ink landed on the subject. The failures
   were small or low-contrast cuts, plus the transition frames below. With transitions kept inside the areas, no
-  frame has ink outside its area, and ink on the subject is 0.0 %. Lines 1, 5, 7 and 8 still fail, on contrast or
-  glyph height only.
+  frame has ink outside its area, and ink on the subject is 0.0 %. Lines 1, 5, 7 and 8 still failed, on contrast or
+  glyph height only. With fonts loaded before measuring (see verify), line 6 fails on contrast as well: it had passed
+  on fallback glyphs. None of these contrast failures is a light / shadow mix, since the sky in the areas is even
+  (busy ≤ 0.05). They come from the line's own drawing (glow, stickers, halftone around the glyphs), or from exit
+  frames where no glyph colour is found and solid shapes are measured instead. `fix` passes 1, 6, 7 and 8 (above).
 * **Game footage** (14 s: a sandcastle, legs, two close-up faces). The person mask is solid on the legs and faint on
   the stylised faces (now noted). The sandcastle falls back to saliency, which is weak on photo-like scenes, and is
   flagged. Close-ups leave only small areas, so they are flagged and fail on glyph height; a plate or a director's
