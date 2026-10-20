@@ -1,0 +1,191 @@
+<!doctype html><html><head><meta charset="utf-8"><title>JIZURA backdrop verify</title>
+<style>body{margin:0;background:#111;color:#ddd;font:12px sans-serif}pre{white-space:pre-wrap;margin:4px}canvas{display:block;margin:4px;max-width:100%}</style></head><body>
+<pre id="log">loading…</pre>
+<canvas id="sheet"></canvas>
+<script src="jizura.js"></script>
+<script>
+/* Backdrop verification (served by tools/backdrop/backdrop.py verify): plans the project, draws the transparent lyric
+   layer at each sample time over the background frame and the subject mask the tool prepared, measures, and posts
+     result (JSON): { rows: [{ t, line, cuts, ink, outside, onSubject, contrast, bgContrast, glyph, method, pass }], errors }
+     sheet (PNG):   the contact sheet — one tile per cut (its middle sample), subject tinted red, area dashed green
+   Measures (at the render scale, alpha > 40 counts as ink):
+     outside    ink farther than 1.5 px outside every active cut's area (null when a cut has no area)
+     onSubject  ink on the subject mask / ink
+     contrast   median luminance of the glyphs (pixels in the scheme's fg / ink colours) against the composited ring
+                just around them — the video, or the plate / outline / shadow when the line has one (WCAG ratio)
+     bgContrast the same glyphs against the bare background under them (what the treatment had to fix)
+     glyph      25th percentile height of the main glyph shapes (≥ 0.3 × the tallest) / frame height */
+const $log = document.getElementById('log');
+const say = m => { $log.textContent = m; };
+const img = src => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error('could not load ' + src)); i.src = src; });
+const canvasOf = (im, w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').drawImage(im, 0, 0, w, h); return c; };
+const pixels = c => c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+const rgbOf = h => [1, 3, 5].map(k => parseInt(h.slice(k, k + 2), 16));
+const lin = v => (v /= 255) <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+const lum = (r, g, b) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+const ratio = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+const median = a => { if (!a.length) return null; const s = Float64Array.from(a).sort(); return s[s.length >> 1]; };
+
+function dilate(mask, w, h, r) {                            // square max filter, separable
+  const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let v = 0; for (let k = Math.max(0, x - r); k <= Math.min(w - 1, x + r) && !v; k++) v = mask[y * w + k]; tmp[y * w + x] = v;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let v = 0; for (let k = Math.max(0, y - r); k <= Math.min(h - 1, y + r) && !v; k++) v = tmp[k * w + x]; out[y * w + x] = v;
+  }
+  return out;
+}
+
+function shapeHeights(mask, w, h) {                         // bounding-box heights of 4-connected shapes (area ≥ 4)
+  const seen = new Uint8Array(w * h), hs = [], stack = [];
+  for (let i = 0; i < w * h; i++) {
+    if (!mask[i] || seen[i]) continue;
+    let n = 0, y0 = h, y1 = -1; stack.push(i); seen[i] = 1;
+    while (stack.length) {
+      const j = stack.pop(), y = (j / w) | 0, x = j - y * w; n++;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (const k of [x > 0 ? j - 1 : -1, x < w - 1 ? j + 1 : -1, y > 0 ? j - w : -1, y < h - 1 ? j + w : -1])
+        if (k >= 0 && mask[k] && !seen[k]) { seen[k] = 1; stack.push(k); }
+    }
+    if (n >= 4) hs.push(y1 - y0 + 1);
+  }
+  return hs;
+}
+
+function measure(job, plan, s, cuts, L, B, M, cw, ch) {
+  const K = job.scale, tol = 1.5, n = cw * ch;
+  const zs = cuts.map(c => c.zone && { x0: c.zone.x * K - tol, y0: c.zone.y * K - tol, x1: (c.zone.x + c.zone.w) * K + tol, y1: (c.zone.y + c.zone.h) * K + tol });
+  const zoned = zs.length > 0 && zs.every(Boolean);
+  const cols = [];
+  for (const c of cuts) { const sc = plan.style.schemes[c.scheme] || {}; for (const k of ['fg', 'ink']) if (/^#[0-9a-f]{6}$/i.test(sc[k] || '')) cols.push(rgbOf(sc[k])); }
+  let ink = 0, outside = 0, onSubject = 0, nGlyph = 0, nSolid = 0;
+  const glyph = new Uint8Array(n), solid = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = L[i * 4 + 3];
+    if (a <= 40) continue;
+    ink++;
+    const x = i % cw, y = (i / cw) | 0;
+    if (zoned && !zs.some(z => x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1)) outside++;
+    if (M[i * 4] > 127) onSubject++;
+    if (a >= 230) {
+      solid[i] = 1; nSolid++;
+      const r = L[i * 4], g = L[i * 4 + 1], b = L[i * 4 + 2];
+      if (cols.some(c => (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2 < 70 * 70)) { glyph[i] = 1; nGlyph++; }
+    }
+  }
+  // a cut still in its transition from the previous one is marked ⇐name (transitions draw over the whole frame)
+  const inTrans = c => c.trans && c.index > 0 && s.t - c.start < (c.transDur || 0.35);
+  const row = { t: s.t, line: s.line, cuts: cuts.map(c => c.layout + (c.treat && c.treat !== 'none' ? '/' + c.treat : '') + (inTrans(c) ? ' ⇐' + c.trans : '')).join(' + '),
+    ink, outside: zoned ? outside : null, onSubject: ink ? onSubject / ink : 0, contrast: null, bgContrast: null, glyph: null, method: null };
+  if (ink < 40) { row.method = 'empty'; return row; }
+  let G = glyph; row.method = 'scheme';
+  if (nGlyph < 30) { G = solid; row.method = 'solid'; if (nSolid < 30) { row.method = 'faint'; return row; } }
+  // the ring skips the glyphs' anti-aliased edge (inner) and reaches about 4 design px beyond it
+  const inner = dilate(G, cw, ch, Math.max(1, Math.round(2 * K))), ring = dilate(G, cw, ch, Math.max(1, Math.round(2 * K)) + Math.max(2, Math.round(4 * K)));
+  const gl = [], rl = [], bl = [];
+  for (let i = 0; i < n; i++) {
+    if (G[i]) { gl.push(lum(L[i * 4], L[i * 4 + 1], L[i * 4 + 2])); bl.push(lum(B[i * 4], B[i * 4 + 1], B[i * 4 + 2])); }
+    else if (ring[i] && !inner[i]) {
+      const a = L[i * 4 + 3] / 255, c = k => L[i * 4 + k] * a + B[i * 4 + k] * (1 - a);
+      rl.push(lum(c(0), c(1), c(2)));
+    }
+  }
+  const g = median(gl);
+  row.contrast = +ratio(g, median(rl)).toFixed(2);
+  row.bgContrast = +ratio(g, median(bl)).toFixed(2);
+  row.lum = { glyph: +g.toFixed(3), ring: +median(rl).toFixed(3), bare: +median(bl).toFixed(3), n: gl.length };
+  // glyph height: shapes closed by a couple of px first, so the parts of one character (Hangul jamo, kana dakuten,
+  // the dot of an i) count as one; lines stay apart
+  const r = Math.max(1, Math.round(2 * K));
+  const hs = shapeHeights(dilate(G, cw, ch, r), cw, ch).map(v => v - 2 * r), top = Math.max(0, ...hs);
+  const main = hs.filter(v => v >= 0.3 * top).sort((a, b) => a - b);
+  row.glyph = main.length ? +(main[Math.floor(main.length * 0.25)] / ch).toFixed(4) : null;
+  return row;
+}
+
+function composite(bgC, mkC, layer, cuts, K) {               // what a person would see, with the subject and area marked
+  const c = document.createElement('canvas'); c.width = bgC.width; c.height = bgC.height;
+  const O = c.getContext('2d'), m = pixels(mkC), tint = O.createImageData(c.width, c.height);
+  for (let i = 0; i < c.width * c.height; i++) if (m[i * 4] > 127) { tint.data[i * 4] = 255; tint.data[i * 4 + 3] = 70; }
+  const T = document.createElement('canvas'); T.width = c.width; T.height = c.height; T.getContext('2d').putImageData(tint, 0, 0);
+  O.drawImage(bgC, 0, 0); O.drawImage(T, 0, 0); O.drawImage(layer, 0, 0);
+  O.strokeStyle = '#3f3'; O.lineWidth = 2; O.setLineDash([6, 4]);
+  for (const k of cuts) if (k.zone) O.strokeRect(k.zone.x * K, k.zone.y * K, k.zone.w * K, k.zone.h * K);
+  return c;
+}
+
+function verdict(job, r) {
+  const C = job.criteria, f = [];
+  if (r.method === 'empty' || r.method === 'faint') return f;
+  if (r.outside != null && r.outside > C.outside) f.push('outside');
+  if (r.onSubject >= C.onSubject) f.push('subject');
+  if (r.contrast != null && r.contrast < C.contrast) f.push('contrast');
+  if (r.glyph != null && r.glyph < C.glyph) f.push('glyph');
+  return f;
+}
+
+async function run() {
+  const job = await (await fetch('job/job.json')).json();
+  const p = Object.assign(J.defaultProject(), job.project);
+  say('fonts…');
+  await J.ensureFonts(p.lyrics, null);
+  const plan = J.plan(p, { duration: job.duration, beats: [] });
+  const K = job.scale, cw = Math.round(plan.W * K), ch = Math.round(plan.H * K);
+  const R = new J.Renderer(), result = { rows: [], errors: [], W: plan.W, H: plan.H, scale: K }, tiles = [];
+  let nFail = 0;
+  for (const [i, s] of job.samples.entries()) {
+    say(`frame ${i + 1} / ${job.samples.length}`);
+    const cuts = plan.cuts.filter(c => c.line >= 0 && c.layout !== 'interlude' && s.t >= c.start && s.t < c.start + c.dur);
+    const layer = document.createElement('canvas'); layer.width = cw; layer.height = ch;
+    try { R.frame(layer.getContext('2d'), plan, s.t, { scale: K, transparent: true, noGhost: true }); }
+    catch (e) { result.errors.push(`t=${s.t}: ${e.message}`); continue; }
+    let bg, mk;
+    try { [bg, mk] = await Promise.all([img('job/' + s.bg), img('job/' + s.mask)]); }
+    catch (e) { result.errors.push(`t=${s.t}: ${e.message}`); continue; }
+    const bgC = canvasOf(bg, cw, ch), mkC = canvasOf(mk, cw, ch);
+    const row = measure(job, plan, s, cuts, pixels(layer), pixels(bgC), pixels(mkC), cw, ch);
+    row.fails = verdict(job, row);
+    result.rows.push(row);
+    if (row.fails.length && nFail++ < 80) {                // failing frames saved for a look: verify/fails/t….png
+      const blob = await new Promise(ok => composite(bgC, mkC, layer, cuts, K).toBlob(ok, 'image/png'));
+      row.image = 'fails/' + s.name + '.png';
+      await fetch('frame/' + s.name, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+    }
+    if (s.thumb) tiles.push({ s, row, layer, bgC, mkC, cuts });
+  }
+  // contact sheet
+  const tw = plan.W >= plan.H ? 384 : 216, th = Math.round(tw * plan.H / plan.W), cols = plan.W >= plan.H ? 4 : 6, gap = 6, bar = 18;
+  const sheet = document.getElementById('sheet');
+  sheet.width = cols * (tw + gap); sheet.height = Math.max(1, Math.ceil(tiles.length / cols)) * (th + bar + gap);
+  const O = sheet.getContext('2d');
+  O.fillStyle = '#111'; O.fillRect(0, 0, sheet.width, sheet.height);
+  tiles.forEach(({ s, row, layer, bgC, mkC, cuts }, k) => {
+    const x = (k % cols) * (tw + gap), y = Math.floor(k / cols) * (th + bar + gap), sc = tw / cw;
+    O.drawImage(bgC, x, y + bar, tw, th);
+    const tint = document.createElement('canvas'); tint.width = cw; tint.height = ch;
+    const T = tint.getContext('2d'), d = T.createImageData(cw, ch), m = pixels(mkC);
+    for (let i = 0; i < cw * ch; i++) if (m[i * 4] > 127) { d.data[i * 4] = 255; d.data[i * 4 + 3] = 70; }
+    T.putImageData(d, 0, 0);
+    O.drawImage(tint, x, y + bar, tw, th);
+    O.drawImage(layer, x, y + bar, tw, th);
+    O.strokeStyle = '#3f3'; O.setLineDash([4, 3]);
+    for (const c of cuts) if (c.zone) O.strokeRect(x + c.zone.x * K * sc, y + bar + c.zone.y * K * sc, c.zone.w * K * sc, c.zone.h * K * sc);
+    O.setLineDash([]);
+    O.fillStyle = row.fails.length ? '#b33' : row.method === 'empty' || row.method === 'faint' ? '#555' : '#284'; O.fillRect(x, y, tw, bar);
+    O.fillStyle = '#fff'; O.font = '12px sans-serif';
+    O.fillText(`L${s.line} ${s.t.toFixed(2)}s ${row.fails.length ? row.fails.join(' ') : row.method === 'empty' || row.method === 'faint' ? 'no text yet' : 'ok'}  c${row.contrast ?? '-'} g${row.glyph != null ? (row.glyph * 100).toFixed(1) : '-'}%`, x + 4, y + 13);
+  });
+  say('posting…');
+  await fetch('result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(result) });
+  const blob = await new Promise(ok => sheet.toBlob(ok, 'image/png'));
+  await fetch('sheet', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+  await fetch('done', { method: 'POST', body: '1' });
+  say(`done: ${result.rows.length} frames, ${result.rows.filter(r => r.fails.length).length} failing, ${result.errors.length} errors`);
+  window.RESULT = result;
+}
+run().catch(async e => {
+  say(e.stack);
+  try { await fetch('result', { method: 'POST', body: JSON.stringify({ rows: [], errors: ['run: ' + e.stack] }) }); await fetch('done', { method: 'POST', body: '1' }); } catch (_) {}
+});
+</script></body></html>

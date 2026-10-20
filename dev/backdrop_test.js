@@ -4,27 +4,10 @@
 //    backdrop data must plan exactly as that engine does (every style × aspect × a few seeds and switches)
 // 2. backdrop behaviour: zones from overrides / free areas / avoid boxes, continuity, re-lit schemes, legibility,
 //    untrusted input, ロック snapshots, the After Effects export flag
-const fs = require('fs'), vm = require('vm'), path = require('path'), assert = require('assert');
+const path = require('path'), assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 
-function loadEngine(srcDir) {
-  const noop = () => {};
-  const ctx2d = new Proxy({}, { get: (t, k) => k === 'measureText' ? (() => ({ width: 100, actualBoundingBoxAscent: 80, actualBoundingBoxDescent: 10 }))
-    : (k === 'getImageData' || k === 'createImageData') ? (() => ({ data: new Uint8ClampedArray(4) })) : (typeof k === 'string' && /^create/.test(k)) ? (() => ({ addColorStop: noop })) : noop, set: () => true });
-  const el = () => ({ getContext: () => ctx2d, style: {}, width: 0, height: 0, appendChild: noop, addEventListener: noop, setAttribute: noop, classList: { add: noop, remove: noop, toggle: noop } });
-  const g = { console, Math, JSON, Date, Intl, Map, Set, WeakMap, Promise, Proxy, Symbol, Uint8ClampedArray, Uint32Array, Float32Array, ArrayBuffer, DataView, TextEncoder, setTimeout, clearTimeout };
-  g.window = g;
-  g.document = { createElement: el, getElementById: () => null, querySelectorAll: () => [], head: { appendChild: noop }, fonts: { load: async () => [], ready: Promise.resolve() }, addEventListener: noop };
-  g.localStorage = { getItem: () => null, setItem: noop };
-  g.OffscreenCanvas = function () { return el(); };
-  g.Path2D = function () { return new Proxy({}, { get: () => noop }); };
-  g.DOMMatrix = function () { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; };
-  g.requestAnimationFrame = noop;
-  vm.createContext(g);
-  for (const f of fs.readdirSync(srcDir).filter(f => f.endsWith('.js') && f !== '12_ui.js').sort())
-    vm.runInContext(fs.readFileSync(path.join(srcDir, f), 'utf8'), g, { filename: f });
-  return g.J;
-}
+const { loadEngine } = require('../tools/backdrop/engine');   // the engine in Node with canvas / DOM stubs
 const strip = plan => JSON.stringify(plan, (k, v) => (k === 'appVersion' ? undefined : v));
 
 const J = loadEngine(path.join(ROOT, 'src'));
