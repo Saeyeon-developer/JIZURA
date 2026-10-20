@@ -112,20 +112,21 @@ function measure(job, plan, s, cuts, L, B, M, cw, ch) {
   if (ink < 40) { row.method = 'empty'; return row; }
   // the ring skips the glyphs' anti-aliased edge (inner) and reaches about 4 design px beyond it
   const ringOf = G => [dilate(G, cw, ch, Math.max(1, Math.round(2 * K))), dilate(G, cw, ch, Math.max(1, Math.round(2 * K)) + Math.max(2, Math.round(4 * K)))];
+  // two rings: the edge (the glyphs' anti-aliasing, or the outline / shadow a treatment draws right there) and the
+  // band beyond it; the text reads by whichever edge is stronger (plain text: the band; outlined text: the edge)
   const contrastOf = (G, P = glyph) => {                    // P: what counts as the panel around G (enclosure)
-    const [inner, ring] = ringOf(G), gl = [], rl = [], bl = [];
+    const [inner, ring] = ringOf(G), gl = [], rl = [], el = [], bl = [];
     let rGlyph = 0;
     for (let i = 0; i < n; i++) {
-      if (G[i]) { gl.push(lum(L[i * 4], L[i * 4 + 1], L[i * 4 + 2])); bl.push(lum(B[i * 4], B[i * 4 + 1], B[i * 4 + 2])); }
-      else if (ring[i] && !inner[i]) {
-        const a = L[i * 4 + 3] / 255, c = k => L[i * 4 + k] * a + B[i * 4 + k] * (1 - a);
-        rl.push(lum(c(0), c(1), c(2)));
-        if (P[i]) rGlyph++;
-      }
+      if (G[i]) { gl.push(lum(L[i * 4], L[i * 4 + 1], L[i * 4 + 2])); bl.push(lum(B[i * 4], B[i * 4 + 1], B[i * 4 + 2])); continue; }
+      if (!ring[i]) continue;
+      const a = L[i * 4 + 3] / 255, c = k => L[i * 4 + k] * a + B[i * 4 + k] * (1 - a), v = lum(c(0), c(1), c(2));
+      if (inner[i]) el.push(v);
+      else { rl.push(v); if (P[i]) rGlyph++; }
     }
-    const g = median(gl);
-    return { contrast: ratio(g, median(rl)), bgContrast: ratio(g, median(bl)), enclosed: rl.length ? rGlyph / rl.length : 0,
-             lum: { glyph: +g.toFixed(3), ring: +median(rl).toFixed(3), bare: +median(bl).toFixed(3), n: gl.length } };
+    const g = median(gl), band = ratio(g, median(rl)), edge = el.length ? ratio(g, median(el)) : 0;
+    return { contrast: Math.max(band, edge), bgContrast: ratio(g, median(bl)), enclosed: rl.length ? rGlyph / rl.length : 0,
+             lum: { glyph: +g.toFixed(3), ring: +median(rl).toFixed(3), edge: el.length ? +median(el).toFixed(3) : null, bare: +median(bl).toFixed(3), n: gl.length } };
   };
   let G = glyph, m = null;
   row.method = 'scheme';

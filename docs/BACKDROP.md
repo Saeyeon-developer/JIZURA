@@ -50,7 +50,8 @@ For each lyric line shown over `[start, visEnd]`:
    text does not jump around. Every cut of the line is laid out in that area (layouts are planned for its size) and,
    by default, clipped to it.
 2. **Colours.** With a tone, each cut's colour scheme is copied with `bg` set to the tone colour and `fg` / `ink`
-   brought to 4.5:1, `sub` / `accent` to 3:1 (`J.fitContrast` — lightness only, the style's hues stay). The copies
+   and `accent` brought to 4.5:1, `sub` to 3:1 (`J.fitContrast` — lightness only, the style's hues stay). Accents
+   need the full 4.5:1 because many layouts write the text in the `bg` colour on an accent plate. The copies
    are appended to `plan.style.schemes`; `cut.baseScheme` keeps the drawn one (ロック and 統一感 use it). Key
    backgrounds (green / black) ignore tones.
 3. **Legibility.** `plate` → boxed, `outline` → outline / double outline, `shadow` → soft / hard shadow, `auto` →
@@ -216,7 +217,7 @@ round), and a job can hold several variants of the project, each limited to some
 |---|---|---|
 | outside | ink (alpha > 40) more than 1.5 px outside every active cut's area | 0 px |
 | on subject | ink on the subject mask / ink | < 2 % |
-| contrast | median glyph luminance vs. the composited ring 1–3 px around the glyphs (the video, or the plate / outline / shadow when there is one); `bgContrast` is vs. the bare background. Glyphs are found as below (`method` in report.json) | ≥ 4.5 : 1 |
+| contrast | median glyph luminance vs. the composited pixels around the glyphs, taking the stronger of two rings: the 1 px edge (an outline or shadow drawn right there) and the band 1–3 px beyond it (the video, or a plate); `bgContrast` is vs. the bare background. Glyphs are found as below (`method` in report.json) | ≥ 4.5 : 1 |
 | glyph | 25th percentile height of the main glyph shapes (≥ 0.3 × the tallest), with the parts of a character joined first | ≥ 3 % of H |
 
 Contrast and glyph height are judged on **held text only**. A frame is `moving` while a cut is in the first 70 % of
@@ -268,8 +269,9 @@ replaces, so it is checked as well.
 **One round per step.** All candidates of a step (three seeds, or the areas and legibility values) are rendered
 side by side, as variants of the project in one job, and only for the frontier line and the line before it. The
 first passing candidate, in the order above, is kept. If none passes, the best one is kept when it is better than
-what the line had. "Better" counts frames with ink outside the area or on the subject first, then failing frames,
-then kinds of failure. A candidate that makes the line before it worse is never kept. Then every line whose drawing
+what the line had. "Better" counts frames with ink outside the area or on the subject first, then failures (a frame
+failing contrast and glyph counts twice, so a plate that fixes every frame's contrast but leaves small glyphs is
+progress, and the next round goes after the glyphs with the plate kept), then failing frames, then kinds of failure. A candidate that makes the line before it worse is never kept. Then every line whose drawing
 changed is verified again. `jz.js plan` gives each line a `sig`: a hash of its cuts with their colours, the cut
 before it and the screen effects over it. Lines whose `sig` did not change are not rendered again. A ロック line is
 left alone.

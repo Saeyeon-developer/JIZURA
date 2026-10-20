@@ -128,7 +128,10 @@ J.toneScheme = (st, base, tone) => {
   if (st._toneCache.has(key)) return st._toneCache.get(key);
   const S = st.schemes[b], bg = tone.color, o = Object.assign({}, S, { bg });
   for (const k of ['fg', 'ink']) if (S[k]) o[k] = J.fitContrast(S[k], bg, 4.5);
-  for (const k of ['sub', 'accent', 'accent2']) if (S[k]) o[k] = J.fitContrast(S[k], bg, 3);
+  // accents 4.5:1 as well: many layouts lay the text on an accent plate (ticket, marker, sticker) and write it in the
+  // bg colour (src/11p_layouts*.js onCol takes any colour from 2.4:1), so the plate and its text read only at this
+  for (const k of ['accent', 'accent2']) if (S[k]) o[k] = J.fitContrast(S[k], bg, 4.5);
+  if (S.sub) o.sub = J.fitContrast(S.sub, bg, 3);
   for (const k of ['ghostA', 'ghostB']) if (S[k]) o[k] = J.fitContrast(S[k], bg, 1.6);
   if (S.dim) o.dim = J.mix(bg, o.fg, 0.14);
   if (S.grad) o.grad = S.grad.map(c => J.fitContrast(c, bg, 3));

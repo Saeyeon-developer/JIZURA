@@ -31,11 +31,14 @@ LARGE = 0.6            # an area with this short side (of the frame's) is not wh
 MAX_AREAS = 3          # area candidates per round
 
 def badness(rep_line):
-    """to compare versions of a line: ink outside the area or on the subject first, then failing frames, then kinds"""
+    """to compare versions of a line: ink outside the area or on the subject first, then failures (a frame failing
+    contrast and glyph counts twice, so a plate that fixes the contrast of every frame and leaves small glyphs is
+    progress, and the next round goes after the glyphs with the plate kept), then failing frames, then kinds"""
     if not rep_line:
-        return (0, 0, 0)
+        return (0, 0, 0, 0)
     frames = rep_line['failingFrames']
-    return (sum(1 for f in frames if {'outside', 'subject'} & set(f['fails'])), len(frames), len(rep_line['fails']))
+    return (sum(1 for f in frames if {'outside', 'subject'} & set(f['fails'])), sum(len(f['fails']) for f in frames),
+            len(frames), len(rep_line['fails']))
 
 def same_rect(a, b, tol=2e-3):
     return a is not None and b is not None and all(abs(x - y) < tol for x, y in zip(a, b))
