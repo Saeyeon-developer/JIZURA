@@ -177,8 +177,8 @@ def run(args, B):
                       'errors': report['errors'], 'out': vdir}, ensure_ascii=False))
 
 FIX = {
-    'outside': 'drawn outside the area: by a transition (marked ⇐name; transitions are not clipped to areas) or a '
-               'full-frame layout with clip off — re-roll the line\'s seed',
+    'outside': 'drawn outside the area: by a full-frame layout with clip off, or a transition (marked ⇐name) next to '
+               'a line without an area — re-roll the line\'s seed, or give the neighbouring line an area',
     'subject': 're-roll the seed, then move / enlarge the area away from the subject (overrides[line].zone.rect)',
     'contrast': 'legibility "plate" (or "outline") for the line, or an area over calmer picture',
     'glyph': 'enlarge the area (text scales with it), or a shorter cut split',

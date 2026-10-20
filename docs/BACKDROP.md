@@ -66,9 +66,17 @@ For each lyric line shown over `[start, visEnd]`:
   out of an unclipped area — keep the clip unless you know the layouts in use.
 * Layouts are scaled to the area, and use roughly half of it. Small areas give small text: aim for areas at least
   35–40 % of the frame's short side.
+* Cut-to-cut transitions between two cuts that both have a clipped area play inside those two areas only. Outside the
+  areas the two frames cross-fade. Before this, a transition drew over the whole frame, after each cut had been
+  clipped into its area. Rules, bars and cells (`tyRuleWipe`, `tyGridCells`, …) then crossed the subject. This
+  holds for every output (transparent, keyed, opaque), because keyed output is laid over the video too. When one of
+  the two cuts has no area or `clip: false`, it draws on the whole frame anyway, so the transition does too, as
+  before. 中央を空ける bands are not backdrop areas and keep the old full-frame transitions. Projects without
+  backdrop data render exactly as before (`Renderer.transAreas` returns null).
 * Transparent output: transitions that paint the scheme background over the whole frame (11 of 27, solid or as a
   translucent veil) are replaced by a cross-fade when neither frame has anything at the corners. Before this they
-  flashed a solid colour over the video under the layer.
+  flashed a solid colour over the video under the layer. With areas, the check looks at the corners of the areas,
+  where the transition played.
 * After Effects: `J.planForAE` turns `centerFree` on when cuts have zones, so the panel builds each zoned cut in its
   own stage comp — which always crops to the area (`clip: false` is not honoured there).
 
@@ -183,7 +191,7 @@ goes to `OUT/verify/`:
 
 * `report.md` / `report.json` — per line: worst value of each measure, pass / fail, what to try
   (seed → area → plate), and the failing frames with the cuts drawn at the time. A cut still in its transition is
-  marked `⇐name`.
+  marked `⇐name`; while it lasts, the previous cut's area also counts as inside.
 * `contact.png` — one tile per cut (its 60 % sample): background, subject tinted red, the lyric layer, area dashed.
 * `fails/*.png` — the composite of every failing frame.
 
@@ -199,12 +207,16 @@ The glyph height is approximate: stacked vertical text merges into columns and m
 ### First results
 
 * **Synthetic pan** (`dev/backdrop_tool_test.py`: 9 lines, a figure sliding into the frame). Every chosen area stays
-  clear of the figure's true moving box. In verification, 0.2 % of all lyric ink lands on the subject. The failures
-  are small or low-contrast cuts, plus three transition frames.
+  clear of the figure's true moving box. In verification, 0.2 % of all lyric ink landed on the subject. The failures
+  were small or low-contrast cuts, plus the transition frames below. With transitions kept inside the areas, no
+  frame has ink outside its area, and ink on the subject is 0.0 %. Lines 1, 5, 7 and 8 still fail, on contrast or
+  glyph height only.
 * **Game footage** (14 s: a sandcastle, legs, two close-up faces). The person mask is solid on the legs and faint on
   the stylised faces (now noted). The sandcastle falls back to saliency, which is weak on photo-like scenes, and is
   flagged. Close-ups leave only small areas, so they are flagged and fail on glyph height; a plate or a director's
   framing is the answer there.
-* **Engine finding:** transitions (`tyRuleWipe`, `tyGridCells`, …) draw over the whole frame and are not clipped to
-  the areas. Mid-transition frames put rules and bars over the subject. The corner check from stage 1 only catches
-  full-frame fills.
+* **Engine finding (fixed):** transitions (`tyRuleWipe`, `tyGridCells`, …) drew over the whole frame and were not
+  clipped to the areas. Mid-transition frames put rules and bars over the subject; the corner check from stage 1 only
+  caught full-frame fills. On the synthetic pan, lines 2, 3, 4 and 8 failed "outside" on ⇐tyGridCells / ⇐tyRuleWipe
+  frames only (1.2k–8.4k px; lines 3 and 4 also had 2.7 % and 3.8 % of their ink on the subject). Now transitions
+  play inside the two cuts' areas (see Rendering notes), and those frames have 0 px outside and 0 % on the subject.

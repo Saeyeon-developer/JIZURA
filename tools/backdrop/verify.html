@@ -9,7 +9,8 @@
      result (JSON): { rows: [{ t, line, cuts, ink, outside, onSubject, contrast, bgContrast, glyph, method, pass }], errors }
      sheet (PNG):   the contact sheet — one tile per cut (its middle sample), subject tinted red, area dashed green
    Measures (at the render scale, alpha > 40 counts as ink):
-     outside    ink farther than 1.5 px outside every active cut's area (null when a cut has no area)
+     outside    ink farther than 1.5 px outside every active cut's area — and the previous cut's during a transition
+                (null when one of them has no area)
      onSubject  ink on the subject mask / ink
      contrast   median luminance of the glyphs (pixels in the scheme's fg / ink colours) against the composited ring
                 just around them — the video, or the plate / outline / shadow when the line has one (WCAG ratio)
@@ -55,7 +56,12 @@ function shapeHeights(mask, w, h) {                         // bounding-box heig
 
 function measure(job, plan, s, cuts, L, B, M, cw, ch) {
   const K = job.scale, tol = 1.5, n = cw * ch;
-  const zs = cuts.map(c => c.zone && { x0: c.zone.x * K - tol, y0: c.zone.y * K - tol, x1: (c.zone.x + c.zone.w) * K + tol, y1: (c.zone.y + c.zone.h) * K + tol });
+  // a cut still in its transition from the previous one is marked ⇐name; the engine plays the transition inside both
+  // cuts' areas (src/09_render.js transAreas), so the outgoing cut's area counts as inside while it lasts
+  const prevOf = c => { const p = plan.cuts[c.index - 1]; return p && Math.abs(p.end - c.start) < 0.06 ? p : null; };
+  const inTrans = c => c.trans && c.index > 0 && s.t - c.start < (c.transDur || 0.35) && prevOf(c);
+  const areas = cuts.concat(cuts.filter(inTrans).map(prevOf));
+  const zs = areas.map(c => c.zone && { x0: c.zone.x * K - tol, y0: c.zone.y * K - tol, x1: (c.zone.x + c.zone.w) * K + tol, y1: (c.zone.y + c.zone.h) * K + tol });
   const zoned = zs.length > 0 && zs.every(Boolean);
   const cols = [];
   for (const c of cuts) { const sc = plan.style.schemes[c.scheme] || {}; for (const k of ['fg', 'ink']) if (/^#[0-9a-f]{6}$/i.test(sc[k] || '')) cols.push(rgbOf(sc[k])); }
@@ -74,8 +80,6 @@ function measure(job, plan, s, cuts, L, B, M, cw, ch) {
       if (cols.some(c => (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2 < 70 * 70)) { glyph[i] = 1; nGlyph++; }
     }
   }
-  // a cut still in its transition from the previous one is marked ⇐name (transitions draw over the whole frame)
-  const inTrans = c => c.trans && c.index > 0 && s.t - c.start < (c.transDur || 0.35);
   const row = { t: s.t, line: s.line, cuts: cuts.map(c => c.layout + (c.treat && c.treat !== 'none' ? '/' + c.treat : '') + (inTrans(c) ? ' ⇐' + c.trans : '')).join(' + '),
     ink, outside: zoned ? outside : null, onSubject: ink ? onSubject / ink : 0, contrast: null, bgContrast: null, glyph: null, method: null };
   if (ink < 40) { row.method = 'empty'; return row; }
