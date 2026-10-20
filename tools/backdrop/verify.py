@@ -315,7 +315,8 @@ def summarize(result, info):
     lines = []
     for li in sorted({r['line'] for r in rows}):
         rs = [r for r in rows if r['line'] == li and r['method'] not in ('empty', 'faint')]
-        vals = lambda k: [r[k] for r in rs if r.get(k) is not None]
+        held = lambda k: k in ('contrast', 'bgContrast', 'glyph')     # judged on held text only (not entering / exiting)
+        vals = lambda k: [r[k] for r in rs if r.get(k) is not None and not (held(k) and r.get('moving'))]
         fails = sorted({f for r in rs for f in r['fails']})
         lines.append({
             'line': li, 'text': texts.get(li, ''), 'frames': len(rs), 'pass': not fails, 'fails': fails,

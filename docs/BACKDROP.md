@@ -216,8 +216,26 @@ round), and a job can hold several variants of the project, each limited to some
 |---|---|---|
 | outside | ink (alpha > 40) more than 1.5 px outside every active cut's area | 0 px |
 | on subject | ink on the subject mask / ink | < 2 % |
-| contrast | median glyph luminance (pixels in the scheme's `fg` / `ink`) vs. the composited ring 1–3 px around the glyphs (the video, or the plate / outline / shadow when there is one); `bgContrast` is vs. the bare background | ≥ 4.5 : 1 |
+| contrast | median glyph luminance vs. the composited ring 1–3 px around the glyphs (the video, or the plate / outline / shadow when there is one); `bgContrast` is vs. the bare background. Glyphs are found as below (`method` in report.json) | ≥ 4.5 : 1 |
 | glyph | 25th percentile height of the main glyph shapes (≥ 0.3 × the tallest), with the parts of a character joined first | ≥ 3 % of H |
+
+Contrast and glyph height are judged on **held text only**. A frame is `moving` while a cut is in the first 70 % of
+its entrance, in the last 70 % of its exit, or in a transition. There the text is half drawn (a plate already
+faded, letters shrinking out), so those two measures are not judged. Outside and on-subject are judged on every
+frame. On the second game clip, 24 of 63 frames were `moving`.
+
+How glyphs are found, in order:
+
+* `scheme`: pixels in the cut's scheme `fg` / `ink` colours.
+* `inverted`: pixels in the scheme's `bg` colour that are mostly (≥ 50 % of their ring) surrounded by text-coloured
+  pixels. This is text cut out of a panel; taken when it reads better than `scheme`.
+* `panel`: when neither is found, the solid pixels are split into dark and light (Otsu), and a group mostly
+  surrounded by the other is text on a panel (a ticket, a sticker).
+* `solid`: otherwise, all solid pixels.
+
+Without the last three, text on its own panel was measured as "panel vs. floor". On the second game clip that made
+a clearly readable ticket fail. (That ticket still fails, for real: its text is the re-lit grey-blue on orange,
+about 2–3 : 1.)
 
 The glyph height is approximate: stacked vertical text merges into columns and measures too tall.
 

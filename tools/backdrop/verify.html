@@ -54,6 +54,20 @@ function shapeHeights(mask, w, h) {                         // bounding-box heig
   return hs;
 }
 
+function otsu(v) {                                         // threshold splitting values in 0..1 into two groups
+  const N = 64, h = new Float64Array(N);
+  for (const x of v) h[Math.min(N - 1, Math.floor(x * N))]++;
+  let sum = 0; for (let k = 0; k < N; k++) sum += k * h[k];
+  let w0 = 0, s0 = 0, best = 0, at = N / 2;
+  for (let k = 0; k < N - 1; k++) {
+    w0 += h[k]; s0 += k * h[k];
+    const w1 = v.length - w0; if (!w0 || !w1) continue;
+    const d = s0 / w0 - (sum - s0) / w1, b = w0 * w1 * d * d;
+    if (b > best) { best = b; at = k + 1; }
+  }
+  return at / N;
+}
+
 function measure(job, plan, s, cuts, L, B, M, cw, ch) {
   const K = job.scale, tol = 1.5, n = cw * ch;
   // a cut still in its transition from the previous one is marked ⇐name; the engine plays the transition inside both
@@ -63,10 +77,16 @@ function measure(job, plan, s, cuts, L, B, M, cw, ch) {
   const areas = cuts.concat(cuts.filter(inTrans).map(prevOf));
   const zs = areas.map(c => c.zone && { x0: c.zone.x * K - tol, y0: c.zone.y * K - tol, x1: (c.zone.x + c.zone.w) * K + tol, y1: (c.zone.y + c.zone.h) * K + tol });
   const zoned = zs.length > 0 && zs.every(Boolean);
-  const cols = [];
-  for (const c of cuts) { const sc = plan.style.schemes[c.scheme] || {}; for (const k of ['fg', 'ink']) if (/^#[0-9a-f]{6}$/i.test(sc[k] || '')) cols.push(rgbOf(sc[k])); }
-  let ink = 0, outside = 0, onSubject = 0, nGlyph = 0, nSolid = 0;
-  const glyph = new Uint8Array(n), solid = new Uint8Array(n);
+  // text colours: the scheme's fg / ink; and its bg, for text cut out of a panel in the text colour (a ticket, a stamp)
+  const cols = [], inv = [], hex = v => /^#[0-9a-f]{6}$/i.test(v || '');
+  for (const c of cuts) {
+    const sc = plan.style.schemes[c.scheme] || {};
+    for (const k of ['fg', 'ink']) if (hex(sc[k])) cols.push(rgbOf(sc[k]));
+    if (hex(sc.bg)) inv.push(rgbOf(sc.bg));
+  }
+  const near = (set, r, g, b) => set.some(c => (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2 < 70 * 70);
+  let ink = 0, outside = 0, onSubject = 0, nGlyph = 0, nSolid = 0, nInv = 0;
+  const glyph = new Uint8Array(n), solid = new Uint8Array(n), glyphInv = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const a = L[i * 4 + 3];
     if (a <= 40) continue;
@@ -77,28 +97,64 @@ function measure(job, plan, s, cuts, L, B, M, cw, ch) {
     if (a >= 230) {
       solid[i] = 1; nSolid++;
       const r = L[i * 4], g = L[i * 4 + 1], b = L[i * 4 + 2];
-      if (cols.some(c => (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2 < 70 * 70)) { glyph[i] = 1; nGlyph++; }
+      if (near(cols, r, g, b)) { glyph[i] = 1; nGlyph++; }
+      else if (near(inv, r, g, b)) { glyphInv[i] = 1; nInv++; }
     }
   }
   const row = { t: s.t, line: s.line, cuts: cuts.map(c => c.layout + (c.treat && c.treat !== 'none' ? '/' + c.treat : '') + (inTrans(c) ? ' ⇐' + c.trans : '')).join(' + '),
-    ink, outside: zoned ? outside : null, onSubject: ink ? onSubject / ink : 0, contrast: null, bgContrast: null, glyph: null, method: null };
+    ink, outside: zoned ? outside : null, onSubject: ink ? onSubject / ink : 0, contrast: null, bgContrast: null, glyph: null, method: null,
+    // early in its entrance, late in its exit, or in a transition: the text is half drawn, so contrast and glyph
+    // height are not judged (the last 30 % of an entrance and the first 30 % of an exit still count as held)
+    moving: cuts.some(c => {
+      const lt = s.t - c.start, pin = c.inDur > 0 ? lt / c.inDur : 1, pout = c.outDur > 0 ? (lt - (c.dur - c.outDur)) / c.outDur : 0;
+      return pin < 0.7 || pout > 0.3 || !!inTrans(c);
+    }) };
   if (ink < 40) { row.method = 'empty'; return row; }
-  let G = glyph; row.method = 'scheme';
-  if (nGlyph < 30) { G = solid; row.method = 'solid'; if (nSolid < 30) { row.method = 'faint'; return row; } }
   // the ring skips the glyphs' anti-aliased edge (inner) and reaches about 4 design px beyond it
-  const inner = dilate(G, cw, ch, Math.max(1, Math.round(2 * K))), ring = dilate(G, cw, ch, Math.max(1, Math.round(2 * K)) + Math.max(2, Math.round(4 * K)));
-  const gl = [], rl = [], bl = [];
-  for (let i = 0; i < n; i++) {
-    if (G[i]) { gl.push(lum(L[i * 4], L[i * 4 + 1], L[i * 4 + 2])); bl.push(lum(B[i * 4], B[i * 4 + 1], B[i * 4 + 2])); }
-    else if (ring[i] && !inner[i]) {
-      const a = L[i * 4 + 3] / 255, c = k => L[i * 4 + k] * a + B[i * 4 + k] * (1 - a);
-      rl.push(lum(c(0), c(1), c(2)));
+  const ringOf = G => [dilate(G, cw, ch, Math.max(1, Math.round(2 * K))), dilate(G, cw, ch, Math.max(1, Math.round(2 * K)) + Math.max(2, Math.round(4 * K)))];
+  const contrastOf = (G, P = glyph) => {                    // P: what counts as the panel around G (enclosure)
+    const [inner, ring] = ringOf(G), gl = [], rl = [], bl = [];
+    let rGlyph = 0;
+    for (let i = 0; i < n; i++) {
+      if (G[i]) { gl.push(lum(L[i * 4], L[i * 4 + 1], L[i * 4 + 2])); bl.push(lum(B[i * 4], B[i * 4 + 1], B[i * 4 + 2])); }
+      else if (ring[i] && !inner[i]) {
+        const a = L[i * 4 + 3] / 255, c = k => L[i * 4 + k] * a + B[i * 4 + k] * (1 - a);
+        rl.push(lum(c(0), c(1), c(2)));
+        if (P[i]) rGlyph++;
+      }
     }
+    const g = median(gl);
+    return { contrast: ratio(g, median(rl)), bgContrast: ratio(g, median(bl)), enclosed: rl.length ? rGlyph / rl.length : 0,
+             lum: { glyph: +g.toFixed(3), ring: +median(rl).toFixed(3), bare: +median(bl).toFixed(3), n: gl.length } };
+  };
+  let G = glyph, m = null;
+  row.method = 'scheme';
+  if (nGlyph >= 30) m = contrastOf(glyph);
+  // inverted text: pixels in the scheme's bg colour, mostly surrounded by text-coloured panel, are the letters
+  if (nInv >= 30) {
+    const v = contrastOf(glyphInv);
+    if (v.enclosed >= 0.5 && (!m || v.contrast > m.contrast)) { m = v; G = glyphInv; row.method = 'inverted'; }
   }
-  const g = median(gl);
-  row.contrast = +ratio(g, median(rl)).toFixed(2);
-  row.bgContrast = +ratio(g, median(bl)).toFixed(2);
-  row.lum = { glyph: +g.toFixed(3), ring: +median(rl).toFixed(3), bare: +median(bl).toFixed(3), n: gl.length };
+  if (!m) {
+    if (nSolid < 30) { row.method = 'faint'; return row; }
+    // no text colours found: split the solid pixels into dark and light; a group mostly surrounded by the other is
+    // text on a panel (a ticket, a sticker); otherwise all solid pixels against what is around them
+    const ls = [];
+    for (let i = 0; i < n; i++) if (solid[i]) ls.push(lum(L[i * 4], L[i * 4 + 1], L[i * 4 + 2]));
+    const cut = otsu(ls);
+    const dark = new Uint8Array(n), light = new Uint8Array(n);
+    let nd = 0, nl = 0;
+    for (let i = 0; i < n; i++) if (solid[i]) { if (lum(L[i * 4], L[i * 4 + 1], L[i * 4 + 2]) < cut) { dark[i] = 1; nd++; } else { light[i] = 1; nl++; } }
+    for (const [A, Bm, k] of [[dark, light, nd], [light, dark, nl]]) {
+      if (k < 30) continue;
+      const v = contrastOf(A, Bm);
+      if (v.enclosed >= 0.5 && (!m || v.contrast > m.contrast)) { m = v; G = A; row.method = 'panel'; }
+    }
+    if (!m) { G = solid; row.method = 'solid'; m = contrastOf(solid); }
+  }
+  row.contrast = +m.contrast.toFixed(2);
+  row.bgContrast = +m.bgContrast.toFixed(2);
+  row.lum = m.lum;
   // glyph height: shapes closed by a couple of px first, so the parts of one character (Hangul jamo, kana dakuten,
   // the dot of an i) count as one; lines stay apart
   const r = Math.max(1, Math.round(2 * K));
@@ -124,6 +180,7 @@ function verdict(job, r) {
   if (r.method === 'empty' || r.method === 'faint') return f;
   if (r.outside != null && r.outside > C.outside) f.push('outside');
   if (r.onSubject >= C.onSubject) f.push('subject');
+  if (r.moving) return f;                                  // readability is judged on held text only
   if (r.contrast != null && r.contrast < C.contrast) f.push('contrast');
   if (r.glyph != null && r.glyph < C.glyph) f.push('glyph');
   return f;
