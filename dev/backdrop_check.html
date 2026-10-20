@@ -1,0 +1,89 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>body{margin:0;background:#111;color:#ddd;font:12px sans-serif}canvas{display:block;margin:4px;max-width:100%}pre{white-space:pre-wrap;margin:4px}</style></head><body>
+<pre id="log"></pre>
+<canvas id="out"></canvas>
+<script src="jizura.js"></script>
+<script>
+/* Backdrop check: lyrics planned with a backdrop track, drawn transparent over a synthetic picture
+   (dark sky, a bright subject on the right, a bright floor bottom-left) — contact sheet + numbers.
+   Built by python3 build.py --dev into dev/www; open dev/www/backdrop_check.html through a local server.
+   window.RESULT = { rows: [{ label, t, text, layout, ink, outside, onSubject }], errors: [] } */
+const SUBJECT = [0.56, 0.18, 0.24, 0.82];                 // x, y, w, h of the figure (0..1), before the pan
+const FLOOR = [0, 0.72, 0.55, 0.28];
+const panX = t => -t * 0.003;                             // slow pan to the left
+function paint(W, H, t) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d');
+  const g = x.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#1b2440'); g.addColorStop(1, '#3a3f66'); x.fillStyle = g; x.fillRect(0, 0, W, H);
+  const p = panX(t);
+  x.fillStyle = '#f2e6d8'; x.fillRect((FLOOR[0] + p) * W, FLOOR[1] * H, FLOOR[2] * W, FLOOR[3] * H);
+  x.fillStyle = '#e8eef7'; x.fillRect((SUBJECT[0] + p) * W, (SUBJECT[1] + 0.12) * H, SUBJECT[2] * W, (SUBJECT[3] - 0.12) * H);
+  x.fillStyle = '#f7d9c4'; x.beginPath(); x.ellipse((SUBJECT[0] + SUBJECT[2] / 2 + p) * W, (SUBJECT[1] + 0.07) * H, SUBJECT[2] * W * 0.32, 0.07 * H, 0, 0, 7); x.fill();
+  return c;
+}
+const subjectAt = t => [SUBJECT[0] + panX(t), SUBJECT[1], SUBJECT[2], SUBJECT[3]];
+const LYRICS = ['[00:01.00]새벽의 색을 기억하고 있어', '[00:05.00]*투명*한 채로 끝낼 수 없어!', '[00:09.00]夜明けの色を覚えてる', '[00:13.00]Hello world, still here', '[00:17.00]아직 늦지 않았을까'].join('\n');
+// what an analysis would hand over: the subject box per stretch of time, and the floor's colour where the text goes
+const track = [
+  { t0: 0, t1: 8, avoid: [subjectAt(4)] },
+  { t0: 8, t1: 30, free: [[0.03, 0.70, 0.5, 0.28], [0.04, 0.06, 0.46, 0.5]], tone: { color: '#E8DCD0', busy: 0.15 } },
+];
+const CASES = [
+  ['none 16:9', { aspect: '16:9' }, null],
+  ['track 16:9 noir', { aspect: '16:9', style: 'noir' }, track],
+  ['track 16:9 paper', { aspect: '16:9', style: 'paper' }, track],
+  ['track 9:16 hud', { aspect: '9:16', style: 'hud' }, [{ t0: 0, t1: 30, avoid: [[0.2, 0.3, 0.6, 0.45]] }]],
+  ['busy 16:9 caution', { aspect: '16:9', style: 'caution' }, [{ t0: 0, t1: 30, free: [[0.04, 0.06, 0.5, 0.55]], tone: { color: '#9A8F86', busy: 0.8 } }]],
+];
+async function run() {
+  const log = document.getElementById('log'), out = document.getElementById('out'), O = out.getContext('2d');
+  const RESULT = { rows: [], errors: [] };
+  await J.ensureFonts(LYRICS, null);
+  const R = new J.Renderer(), K = 0.125, SC = 0.18, rows = [];
+  for (const [label, o, tr] of CASES) {
+    const p = Object.assign(J.defaultProject(), { lyrics: LYRICS, title: '', seed: 5 }, o);
+    p.fx = Object.assign(J.defaultProject().fx, { hud: 'off', flash: false });
+    if (tr) p.backdrop = J.normalizeBackdrop({ track: tr });
+    let plan; try { plan = J.plan(p, { duration: 22, beats: [] }); } catch (e) { RESULT.errors.push(label + ' plan: ' + e.message); continue; }
+    const cuts = plan.cuts.filter(c => c.line >= 0 && c.layout !== 'interlude');
+    rows.push({ label, plan, cuts });
+    for (const c of cuts) for (const f of [0.35, 0.6, 0.92]) {        // during the hold and into the exit
+      const t = c.start + c.dur * f;
+      const cv = document.createElement('canvas'); cv.width = Math.round(plan.W * K); cv.height = Math.round(plan.H * K);
+      try { R.frame(cv.getContext('2d'), plan, t, { scale: K, transparent: true, noGhost: true }); } catch (e) { RESULT.errors.push(`${label} t=${t.toFixed(2)}: ${e.message}`); continue; }
+      const d = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data, Z = c.zone, S = subjectAt(t);
+      let ink = 0, outside = 0, onSubject = 0;
+      for (let y = 0; y < cv.height; y++) for (let x = 0; x < cv.width; x++) {
+        if (d[(y * cv.width + x) * 4 + 3] < 40) continue;
+        ink++; const X = x / K, Y = y / K, u = X / plan.W, v = Y / plan.H;
+        if (Z && (X < Z.x || X > Z.x + Z.w || Y < Z.y || Y > Z.y + Z.h)) outside++;
+        if (u >= S[0] && u <= S[0] + S[2] && v >= S[1] && v <= S[1] + S[3]) onSubject++;
+      }
+      RESULT.rows.push({ label, t: +t.toFixed(2), text: c.text, layout: c.layout, enter: c.enter, exit: c.exit, treat: c.treat, ink, outside, onSubject });
+    }
+  }
+  // contact sheet: the middle of each cut over the picture, zone dashed
+  const cols = 5, cw = 1920 * SC, gap = 6;
+  const heights = rows.map(r => Math.ceil(r.cuts.length / cols) * (r.plan.H * SC * (r.plan.W > r.plan.H ? 1 : 0.42) + gap) + 18);
+  out.width = cols * (cw + gap); out.height = heights.reduce((a, b) => a + b, 0);
+  O.fillStyle = '#111'; O.fillRect(0, 0, out.width, out.height);
+  let y0 = 0;
+  rows.forEach((r, ri) => {
+    const s = r.plan.W > r.plan.H ? SC : SC * 0.42, w = r.plan.W * s, h = r.plan.H * s;
+    O.fillStyle = '#ddd'; O.font = '13px sans-serif'; O.fillText(r.label, 4, y0 + 13);
+    r.cuts.forEach((c, k) => {
+      const t = c.start + c.dur * 0.5, x = (k % cols) * (cw + gap), y = y0 + 18 + Math.floor(k / cols) * (h + gap);
+      const fc = document.createElement('canvas'); fc.width = Math.round(w); fc.height = Math.round(h);
+      try { R.frame(fc.getContext('2d'), r.plan, t, { scale: s, transparent: true }); } catch (e) {}
+      O.drawImage(paint(r.plan.W, r.plan.H, t), x, y, w, h); O.drawImage(fc, x, y);
+      if (c.zone) { O.strokeStyle = '#3f3'; O.setLineDash([4, 3]); O.strokeRect(x + c.zone.x * s, y + c.zone.y * s, c.zone.w * s, c.zone.h * s); O.setLineDash([]); }
+    });
+    y0 += heights[ri];
+  });
+  const sum = {};
+  for (const r of RESULT.rows) { const S = sum[r.label] || (sum[r.label] = { frames: 0, ink: 0, outside: 0, onSubject: 0 }); S.frames++; S.ink += r.ink; S.outside += r.outside; S.onSubject += r.onSubject; }
+  RESULT.summary = sum;
+  log.textContent = JSON.stringify({ summary: sum, errors: RESULT.errors }, null, 1);
+  window.RESULT = RESULT;
+}
+run().catch(e => { window.RESULT = { errors: ['run: ' + e.stack] }; document.getElementById('log').textContent = e.stack; });
+</script></body></html>

@@ -109,6 +109,9 @@ function mergeProject(p) {
   for (const g of Object.keys(en)) en[g] = Object.assign(en[g], ((p && p.enabled) || {})[g] || {});
   o.enabled = en;
   o.overrides = (p && p.overrides) || {};
+  // backdrop measurements (src/08c_backdrop.js) — numbers, rectangles and colours only
+  const bd = J.normalizeBackdrop(p && p.backdrop);
+  if (bd) o.backdrop = bd; else delete o.backdrop;
   o.locks = { tech: {}, params: {} };
   // project files are untrusted: only plain keys may be locked, and only on (never a value we did not write)
   for (const [g, on] of Object.entries((p && p.locks && p.locks.tech) || {})) if (on === true && /^[\w-]+$/.test(g)) o.locks.tech[g] = true;

@@ -313,6 +313,9 @@ J.planForAE = (plan, project, range) => {
   clean.version = 2;
   clean.width = J.outputSize(project)[0]; clean.height = J.outputSize(project)[1];
   clean.extra = project.extra === true; clean.wa = project.wa !== false;
+  // backdrop free areas: the panel builds a cut that has a zone in its own stage comp (only when centerFree is set),
+  // which also crops it to the area (zone.clip === false is not honoured there)
+  if (!clean.centerFree && (clean.cuts || []).some(c => c.zone)) clean.centerFree = true;
   if (J.setOn) for (const s of J.SET_ORDER) clean[s] = J.setOn(project, s);
   clean.fonts = {};
   for (const [role, keys] of Object.entries(plan.style.fonts)) clean.fonts[role] = keys.map(k => J.FONTS[k] ? J.FONTS[k].label : k);

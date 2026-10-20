@@ -289,6 +289,10 @@ J.plan = (project, audio) => {
   // the lyric of every cut is split in two: the first half in band 0 (left / top), the second in band 1 (right / bottom)
   const zoneOf = () => (zones ? Object.assign({}, zones[0]) : null);
   if (zones && en.bg) en.bg.bigChar = false;               // the one background that draws the lyric itself (big, centred)
+  // backdrop (src/08c_backdrop.js): where a background video leaves room for the lyrics, and its colour there
+  const hasBackdrop = !!(project.backdrop && project.backdrop.track) || Object.values(project.overrides || {}).some(o => o && (o.zone || o.tone));
+  if (hasBackdrop && en.bg) en.bg.bigChar = false;
+  let bdPrev = null;                                        // the free area the previous line used (text stays put while it can)
   const plan = {
     version: 1, generator: 'JIZURA', appVersion: '@VERSION@', title, artist, W, H, fps: project.fps || 24,
     duration: tm.duration, styleKey: project.style, style: st, fx, seed: project.seed,
@@ -354,7 +358,9 @@ J.plan = (project, audio) => {
     let nC = Math.round(D / L);
     const maxC = chunks.length + (chunks.length >= 2 && D > 2.0 ? 1 : 0);
     nC = J.clamp(nC, 1, Math.max(1, maxC));
-    const ovAny = Object.keys(ov).some(k2 => !['lock', 'lockedSeed', 'seed', 'cutTech', 'cutLayouts', 'cutQuiet', 'cutTime'].includes(k2));
+    const ovAny = Object.keys(ov).some(k2 => !['lock', 'lockedSeed', 'seed', 'cutTech', 'cutLayouts', 'cutQuiet', 'cutTime', 'zone', 'tone', 'legibility'].includes(k2));
+    const BD = hasBackdrop ? J.lineBackdrop(project, li, s, visEnd, W, H, bdPrev) : null;
+    if (BD && BD.rect) bdPrev = BD.rect;
     const kime = !!(U && U.kime.has(li) && !ov.cuts);
     if (ov.single || kime) nC = 1;
     if (zones) nC = Math.max(1, Math.min(nC, Math.floor(chunks.length / 2)));   // 中央を空ける: each cut is split in two, so keep ≥ 2 words per cut
@@ -401,7 +407,7 @@ J.plan = (project, audio) => {
       const txt = halves ? halves[0] : u.text;
       const nn = Math.max(...(halves || [u.text]).map(t => [...t.replace(/\s+/g, '')].length));
       const emph = kime || ln.impact && (k === 0 || u.recap) || ln.emph.some(w => u.text.includes(w));
-      const Z = zoneOf(li), LW = Z ? Z.w : W, LH = Z ? Z.h : H;       // the frame this cut is laid out in
+      const Z = zoneOf(li) || (BD && BD.zone ? Object.assign({}, BD.zone) : null), LW = Z ? Z.w : W, LH = Z ? Z.h : H;   // the frame this cut is laid out in
       const UU = U && !ovAny ? U : null;                              // per-line settings always win over 統一感
       const tech = cutTechOf(ov, k);                                  // このカットだけの指定
       let layout = ov.layout && J.LAYOUTS[ov.layout] ? ov.layout : pickLayout(rng, st, en, nn, dur, history, emph, u.recap, LH > LW);
@@ -494,6 +500,11 @@ J.plan = (project, audio) => {
         if (tech.enter && J.ENTER[tech.enter]) inDur = i2;
         if (tech.exit && J.EXIT[tech.exit]) outDur = o2;
       }
+      // backdrop: a treatment that reads on a busy picture (own random stream, so the other picks stay as they were)
+      if (BD && !ov.treat && !tech.treat && !LS) {
+        const r3 = J.rng(J.h(lineSeed, k, 97)), lt = J.legibleTreat(BD, treat, r3);
+        if (lt) { treat = lt; treatP = J.TREAT[lt].plan ? J.TREAT[lt].plan(r3, st) : {}; }
+      }
       // cut-to-cut transition (replaces the previous cut's exit and this cut's entrance)
       const prevCut = plan.cuts[plan.cuts.length - 1];
       let trans = null, transP = {}, transDur = 0, morph = null;
@@ -546,6 +557,8 @@ J.plan = (project, audio) => {
       if (morph) cut.morph = morph;
       if (UU) UU.remember(li, k, txt, cut);
       if (zones) splitCut(cut, halves, zones, st, dur, LS);
+      // backdrop: colours re-lit for the picture behind this line (the drawn scheme is kept in baseScheme for ロック / 統一感)
+      if (BD && BD.tone && !plan.keyBg) for (const c of [cut, cut.companion].filter(Boolean)) { c.baseScheme = c.scheme; c.scheme = J.toneScheme(st, c.scheme, BD.tone); }
       // 文字整列: effects don't pile up — one decoration, no text treatment on top of it
       if (plan.typeset) { cut.decor = cut.decor.slice(0, 1); if (cut.decor.length && cut.treat !== 'none') { cut.treat = 'none'; cut.treatP = {}; } }
       plan.cuts.push(cut);
@@ -752,7 +765,7 @@ J.lineSnapshot = (plan, li) => {
   const cuts = plan.cuts.filter(c => c.line === li && c.utext != null);
   if (!cuts.length) return null;
   const S = JSON.parse(JSON.stringify(cuts.map(c => ({ utext: c.utext, layout: c.layout, enter: c.enter, exit: c.exit, hold: c.hold, inDur: c.inDur, outDur: c.outDur,
-    params: c.params, decor: c.decor, treat: c.treat, treatP: c.treatP, bg: c.bg, bgP: c.bgP, cam: c.cam, camP: c.camP, scheme: c.scheme, seed: c.seed,
+    params: c.params, decor: c.decor, treat: c.treat, treatP: c.treatP, bg: c.bg, bgP: c.bgP, cam: c.cam, camP: c.camP, scheme: c.baseScheme != null ? c.baseScheme : c.scheme, seed: c.seed,
     trans: c.trans, transP: c.transP, transDur: c.transDur, morph: c.morph || null, weightGrow: !!c.weightGrow, kime: !!c.kime, recap: !!c.recap, twinParams: c.companion ? c.companion.params : null, events: [] }))));
   // each accent belongs to the cut it plays in (the ones just before a cut start belong to that cut)
   for (const e of plan.events) {

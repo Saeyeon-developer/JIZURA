@@ -158,7 +158,7 @@ class Renderer {
       const csc = st.schemes[cut.scheme % st.schemes.length] || st.schemes[0];
       const lt = tp - cut.start;
       const X = LX || ctx;
-      const Z = plan.centerFree && cut.zone ? cut.zone : null;
+      const Z = cut.zone || null;                          // 中央を空ける bands, or a backdrop free area (src/08c_backdrop.js)
       const env = this.makeEnv(X, plan, cut, csc, {
         pass: P.pass, passColor: P.pass === 'A' ? csc.ghostA : P.pass === 'B' ? csc.ghostB : null,
         t: tp, lt, ltb: lt + P.lag, step: Math.floor(tp / clock + 1e-6), scale, allowFilter, energy, beat: beatInfo, layer, zone: Z,
@@ -166,7 +166,8 @@ class Renderer {
       });
       X.save();
       // 中央を空ける: the cut (text, decorations, its camera) is drawn in its band and clipped to it
-      if (Z) { X.beginPath(); X.rect(Z.x, Z.y, Z.w, Z.h); X.clip(); X.translate(Z.x, Z.y); }
+      // (a backdrop area can ask not to be clipped: zone.clip === false)
+      if (Z) { if (Z.clip !== false) { X.beginPath(); X.rect(Z.x, Z.y, Z.w, Z.h); X.clip(); } X.translate(Z.x, Z.y); }
       const W = env.W, H = env.H;
       // camera move for this cut (default: slow push-in)
       let cam = null;
@@ -205,6 +206,14 @@ class Renderer {
         ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none';
         try { J.TRANS[mainCut.trans].draw(ctx, A, B, J.clamp(lt / dur), { cw, ch, sc, scPrev: psc, st, P: mainCut.transP || {}, step, t, scale, allowFilter, seed: mainCut.seed | 0, tmp: (w, h) => this.ensure(this.transC || (this.transC = mk(2, 2)), w, h) }); }
         catch (e) { console.warn('trans', mainCut.trans, e); }
+        // 透過: several transitions paint the scheme background over the whole frame (fine on an opaque frame, a solid
+        // flash over the video under an overlay) — when the corners came out opaque but neither frame has them, cross-fade
+        if (opt.transparent && this.paintedCorners(ctx, A, B, cw, ch)) {
+          const p = J.clamp(lt / dur);
+          ctx.clearRect(0, 0, cw, ch);
+          ctx.globalAlpha = 1 - p; ctx.drawImage(A, 0, 0);
+          ctx.globalAlpha = p; ctx.drawImage(B, 0, 0);
+        }
         ctx.restore();
       }
     }
@@ -243,6 +252,16 @@ class Renderer {
       if (key === 'green') { ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = J.KEY_BG.green; ctx.fillRect(0, 0, cw, ch); }
     }
     ctx.restore();
+  }
+
+  /* true when out is painted at a frame corner where A and B are both empty (see the transition above) —
+     solid fills and the translucent veils some transitions lay over the whole frame alike */
+  paintedCorners(out, A, B, cw, ch) {
+    const a = (c, x, y) => c.getImageData(x, y, 1, 1).data[3];
+    const ax = A.getContext('2d'), bx = B.getContext('2d');
+    for (const [x, y] of [[1, 1], [cw - 2, 1], [1, ch - 2], [cw - 2, ch - 2]])
+      if (a(out, x, y) > 24 && a(ax, x, y) < 8 && a(bx, x, y) < 8) return true;
+    return false;
   }
 
   /* モーフ: where every glyph of the previous cut rests at its end, and where this cut's glyphs land (cached) */
