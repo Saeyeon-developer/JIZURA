@@ -108,6 +108,154 @@ Use **Save** and **Open** for `.jizura.json` projects. **Export for AE** creates
 </details>
 
 <details>
+<summary><h2>Lyrics over a background video (backdrop) and the AI agent workflow</h2></summary>
+
+JIZURA can be the transparent lyric layer of a music video whose picture already exists: a slow pan over a large illustration, or an AI-generated or game video. The engine never looks at the video. Whoever analysed it (an MV director agent, the analysis tool below, or a person) writes the result into the project as data, and JIZURA then:
+
+- lays every lyric line out in the picture's free areas,
+- keeps it off the subject,
+- re-lights its colours to read on what is behind it.
+
+Projects without this data plan exactly as before. Full contract and details: [docs/BACKDROP.md](docs/BACKDROP.md).
+
+<details>
+<summary><h3>What goes into the project</h3></summary>
+
+```jsonc
+"backdrop": {
+  "version": 1, "offset": 0,            // background time = song time + offset (seconds)
+  "legibility": "auto",                 // auto | none | outline | shadow | plate
+  "track": [                            // measurements, by time (they survive lyric edits)
+    { "t0": 0.5, "t1": 3.2,
+      "free":  [[0.03, 0.55, 0.28, 0.42]],              // where text may go, best first (x, y, w, h in 0..1)
+      "avoid": [[0.42, 0.10, 0.18, 0.88]],              // the subject
+      "tone":  { "color": "#3B4B52", "busy": 0.44 } }   // the picture inside the free area
+  ]
+},
+"overrides": { "4": { "seed": 2, "zone": { "rect": [0.05, 0.29, 0.28, 0.48] }, "legibility": "plate" } }   // decisions, by line
+```
+
+What JIZURA does with it:
+
+- **Layout:** every cut of a line is laid out in its area and clipped to it. Transitions between two cuts that both have areas stay inside those areas.
+- **Colours:** text colours are fitted to 4.5:1 against the tone.
+- **Busy pictures:** an outline, shadow or plate is picked when the picture is busy.
+
+**Open** the project in the browser editor (the data is validated on load) and export **Transparent PNGs** or **Transparent PNG layers** to lay over the video. **Export for AE** builds each zoned cut in its own stage comp.
+
+</details>
+
+<details>
+<summary><h3>The analysis tool (when no director agent supplies the data)</h3></summary>
+
+`tools/backdrop/` writes the `backdrop` block from the background, checks the rendered result, and fixes failing lines. Everything runs locally and no paid API is called.
+
+**Requirements:** Python 3 with numpy and Pillow, Node.js, and ffmpeg / ffprobe on PATH. Optional extras:
+
+- `npx` + HyperFrames for person segmentation (`npx hyperframes remove-background`, CPU, model weights fetched once). Without it, a saliency fallback is used.
+- Chrome or Edge for verification (run headless).
+
+```sh
+# 1. analyze: write project.backdrop from the background (a video, or a HyperFrames-style pan)
+python tools/backdrop/backdrop.py analyze song.jizura.json --video bg.mp4
+python tools/backdrop/backdrop.py analyze song.jizura.json --pan pan.json
+
+# 2. verify: render the transparent lyric layer over the real frames and measure it
+python tools/backdrop/backdrop.py verify song.jizura.json --video bg.mp4
+
+# 3. fix: work through failing lines (seed → area → legibility), writing project.overrides only
+python tools/backdrop/backdrop.py fix song.jizura.json --video bg.mp4
+```
+
+Common options:
+
+- `--out DIR`: output folder (default `song.backdrop/` next to the project).
+- `--offset S`: background time = song time + offset.
+- `--duration S`: song length.
+- `--detector auto|person|saliency`
+- `--review FILE`: agent-confirmed lines (see below).
+- `--browser auto|none|PATH`: `none` prints a local URL to open in any browser, for example an agent's browser pane.
+- `--rounds N`: fix rounds.
+
+**analyze** plans the lyrics once to get each line's time, then samples the background over each line. For a video it takes frames at the start, middle and end. For a pan it finds the subject once on the illustration and moves it with the keyframes. It detects the subject and scores candidate areas by size, distance from the subject, clutter and closeness to the previous line's area. The tone is the median colour and clutter inside the chosen area.
+
+**verify** reports, per line:
+
+- ink outside the area (pass: 0 px)
+- ink on the subject (pass: < 2 %)
+- glyph contrast against what is around the text (pass: ≥ 4.5:1)
+- glyph height (pass: ≥ 3 % of the frame)
+
+Contrast and glyph height are judged on held text, not while it enters or exits.
+
+Output, in `song.backdrop/`:
+
+| file | what it is |
+|---|---|
+| `backdrop.json` | the block, also written into the project |
+| `review.json` / `review.png` | per line: proposal, detector, reasons; the sheet shows the subject in red and the chosen area in green; flagged lines are marked **CHECK** |
+| `verify/report.md`, `report.json` | pass / fail per line, the failing frames, what to try (and, after `fix`, what was tried and why a line was left) |
+| `verify/contact.png`, `verify/fails/*.png` | one tile per cut; every failing frame composited |
+
+</details>
+
+<details>
+<summary><h3>Agent workflow</h3></summary>
+
+1. **With a director agent:** it already plans the shots and the subtitle space, so it writes `backdrop` (and any `overrides`) directly. Then skip to step 4.
+2. **Without one:** run `analyze`. Lines the tool is unsure about are listed in `review.json` → `flagged`, for example when the subject is a saliency guess, the person mask is faint, the free area is small or busy, or no area is clear of the subject.
+3. Look at `review.png` and set `confirm` on any flagged line in `review.json`, then re-run `analyze … --review song.backdrop/review.json`. Frames and masks are cached.
+
+   | `confirm` | effect |
+   |---|---|
+   | `{}` | accept the proposal |
+   | `{"avoid": [[x, y, w, h], …]}` | the subject as boxes (replaces the detection; areas are scored again) |
+   | `{"free": [[x, y, w, h], …]}` | the areas to use, best first |
+   | `{"tone": {"color": "#rrggbb", "busy": 0.3}}` | the tone |
+   | `{"skip": true}` | no entry for the line |
+
+4. Run `verify` and read `verify/report.md`, `contact.png` and the failing frames.
+5. Run `fix`. It re-rolls the line's `seed`, moves or enlarges the area, then tries `legibility` `plate` / `outline`, line by line from the start, and keeps what passes. A line it cannot fix is listed with the reason. Typical reasons: the free area is too small for the shot, or the layout draws small or low-contrast decoration around the text. Those are decisions for the agent or a person: pick a layout (`overrides.cutLayouts` / `cutTech`), re-frame the shot, or accept it.
+6. Open the project in JIZURA and export the transparent layer.
+
+</details>
+
+<details>
+<summary><h3>HyperFrames pans</h3></summary>
+
+A pan is described the way a HyperFrames composition animates the illustration's wrapper (a GSAP tween):
+
+```jsonc
+{
+  "image": "city.png",                  // relative to this file
+  "frame": [1920, 1080],                // composition size
+  "box": [0, -540, 3840, 2160],         // the wrapper's left, top, width, height (default: cover the frame)
+  "origin": "50% 50%",                  // transformOrigin
+  "offset": 0,                          // composition time = song time + offset
+  "keys": [                             // poses at composition seconds; a key's ease shapes the move into it
+    { "t": 0,  "x": 0, "y": 0, "scale": 1 },
+    { "t": 24, "x": -1700, "y": -200, "scale": 1.25, "ease": "power1.inOut" }
+  ]
+}
+```
+
+`xPercent` / `yPercent` and the usual GSAP eases (`none`, `power0–4`, `sine`, `expo`, `circ`, … with `.in` / `.out` / `.inOut`) are supported.
+
+</details>
+
+<details>
+<summary><h3>Limits</h3></summary>
+
+- **Subject detection:** the person model is reliable on people with a body, weaker on stylised close-ups, and blind to subjects that are not people (the saliency fallback is a guess). Those lines are flagged for an agent or a person to confirm.
+- **Small areas give small text:** layouts scale with their area. Leave room for the lyrics when framing the shot.
+- **Re-run when the framing changes:** areas are fractions of the frame, so they survive a resolution change but describe that framing. Re-run the analysis when the aspect ratio or the framing changes.
+- **Tests:** `node dev/backdrop_test.js` (planner checks; plans without backdrop data stay identical) and `python dev/backdrop_tool_test.py OUT --verify` (the whole tool on a synthetic pan).
+
+</details>
+
+</details>
+
+<details>
 <summary><h2>Build and publish</h2></summary>
 
 The version lives in `VERSION` at the repository root; the builds insert it into the pages and panels. Record changes in `CHANGELOG.md`.

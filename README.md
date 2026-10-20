@@ -396,6 +396,21 @@ AE パネルは2種類あります。どちらも中の生成エンジンは同�
 </details>
 
 <details>
+<summary><h2>Lyrics over a background video / AI agent workflow (English)</h2></summary>
+
+JIZURA can render the transparent lyric layer of a music video whose picture already exists (a HyperFrames pan over an illustration, or an AI / game video). The lyrics go in the picture's free areas, stay off the subject, and get colours that read on the picture. The data comes from an MV director agent, or from the local analysis tool in `tools/backdrop/`:
+
+```sh
+python tools/backdrop/backdrop.py analyze song.jizura.json --video bg.mp4   # or --pan pan.json
+python tools/backdrop/backdrop.py verify  song.jizura.json --video bg.mp4
+python tools/backdrop/backdrop.py fix     song.jizura.json --video bg.mp4
+```
+
+Usage, the agent review step (`review.json` → `confirm`) and the pan format: [README.en.md](README.en.md) → "Lyrics over a background video (backdrop) and the AI agent workflow". Full contract: [docs/BACKDROP.md](docs/BACKDROP.md).
+
+</details>
+
+<details>
 <summary><h2>開発・ビルド</h2></summary>
 
 ```
